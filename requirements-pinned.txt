@@ -1,0 +1,11 @@
+# Stage 19 reproducible dependency set, validated for Python 3.11 compatibility.
+# This lock is intentionally separate from requirements.txt so deployment can
+# review/confirm the target environment before changing installed packages.
+python-telegram-bot==22.8
+python-dotenv==1.2.3
+requests==2.34.2
+google-genai==2.23.0
+pypdf==6.18.1
+python-docx==1.2.0
+openpyxl==3.1.5
+python-pptx==1.0.2

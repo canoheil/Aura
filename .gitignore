@@ -1,0 +1,44 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
+# Runtime database
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+*.log.*
+*.pid
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Temporary files
+tmp/
+*.tmp
+*.temp
+
+# Backups / old production copies
+*.backup
+*.before_*
+*.bak
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

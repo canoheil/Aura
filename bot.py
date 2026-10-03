@@ -11,7 +11,6 @@ from typing import Optional
 import base64
 import re
 import json
-import html
 import csv
 import io
 import tempfile
@@ -51,9 +50,11 @@ from telegram.constants import ChatAction
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -78,8 +79,8 @@ REACTION_AI_ENABLED = os.getenv("REACTION_AI_ENABLED", "true").strip().lower() i
 YOU_API_KEY = os.getenv("YOU_API_KEY", "").strip()
 WEB_SEARCH_ENABLED = os.getenv("WEB_SEARCH_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 try:
-    WEB_SEARCH_DAILY_LIMIT = int(os.getenv("WEB_SEARCH_DAILY_LIMIT", "30"))
-    WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "5"))
+    WEB_SEARCH_DAILY_LIMIT = int(os.getenv("WEB_SEARCH_DAILY_LIMIT", "100"))
+    WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "10"))
     WEB_SEARCH_CACHE_TTL = int(os.getenv("WEB_SEARCH_CACHE_TTL", "3600"))
     WEB_SEARCH_CURRENT_CACHE_TTL = int(os.getenv("WEB_SEARCH_CURRENT_CACHE_TTL", "300"))
     WEB_SEARCH_TIMEOUT = int(os.getenv("WEB_SEARCH_TIMEOUT", "20"))
@@ -415,6 +416,17 @@ with db_lock:
         )
         """
     )
+    # Group access control: only whitelisted groups may interact with Aura.
+    # Private chats are never restricted. The list is owner-managed via /settings.
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS allowed_groups (
+            chat_id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            added_at INTEGER NOT NULL
+        )
+        """
+    )
     db.commit()
 
 
@@ -649,6 +661,92 @@ def _memory_tokens(text: str) -> set[str]:
     return {t for t in re.findall(r"[a-zآ-ی0-9]+", _normalize_memory_text(text)) if len(t) >= MEMORY_MIN_QUERY_TOKEN_LEN and t not in MEMORY_STOPWORDS}
 
 
+# ---------- Retrieval-only matching helpers ----------
+# These are used ONLY by get_relevant_memories() so that delete_memory() and
+# every other token consumer keep their exact existing behavior.
+
+# Persian/Arabic digits normalized to ASCII so «ساعت ۷» matches "ساعت 7".
+_MEMORY_DIGIT_MAP = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+# Tokens that carry no retrieval signal: ZWNJ verb particles («می‌خورم» →
+# «می» + «خورم»), object marker «رو», bare plural markers, pronouns and
+# question words. Dropped only for retrieval matching — delete_memory and
+# other token consumers keep their original behavior.
+_MEMORY_MATCH_NOISE = {
+    "می", "نمی", "رو", "ها", "های",
+    "من", "تو", "او", "ما", "شما", "اون", "ایشون",
+    "چی", "چیه", "چیست", "کی", "کیه", "کجا", "کجاست", "چرا", "چطور", "چطوره", "چند", "چنده", "آیا",
+    "بگو", "بدونم", "میدونی", "می‌دونی",
+}
+
+# Light affix lists for matching only (never persisted). Longest-first.
+_FA_STEM_PREFIXES = ("نمی", "می")
+_FA_STEM_SUFFIXES = (
+    "هایی", "های", "ها", "ترین", "تر", "ایم", "اید", "اند",
+    "مان", "تان", "شان", "مون", "تون", "شون", "ام", "ات", "اش",
+    "یم", "ید", "ند", "ش", "م", "ت", "ی", "ه",
+)
+_EN_STEM_SUFFIXES = ("ing", "es", "ed", "s")
+
+
+def _memory_match_normalize(text: str) -> str:
+    return _normalize_memory_text(text).translate(_MEMORY_DIGIT_MAP)
+
+
+def _memory_match_tokens(text: str) -> list[str]:
+    """Ordered tokens for retrieval matching: digit-normalized, noise-filtered.
+
+    Pure-digit tokens are kept even below MEMORY_MIN_QUERY_TOKEN_LEN so a
+    single digit like «۵» still matches "5".
+    """
+    tokens = re.findall(r"[a-z0-9آ-ی]+", _memory_match_normalize(text))
+    return [
+        t for t in tokens
+        if (len(t) >= MEMORY_MIN_QUERY_TOKEN_LEN or t.isdigit())
+        and t not in MEMORY_STOPWORDS and t not in _MEMORY_MATCH_NOISE
+    ]
+
+
+def _memory_light_stem(token: str) -> str:
+    """Very light Persian/English stemmer, for matching only.
+
+    Strips common verbal prefixes (می/نمی) and frequent plural/possessive/person
+    suffixes so «دارم», «داری» and «دارند» all reduce to «دار». Each strip keeps
+    at least 3 characters, so short tokens are never destroyed.
+    """
+    t = token
+    if re.fullmatch(r"[a-z0-9]+", t):
+        for suffix in _EN_STEM_SUFFIXES:
+            if t.endswith(suffix) and len(t) - len(suffix) >= 3:
+                return t[: -len(suffix)]
+        return t
+    for prefix in _FA_STEM_PREFIXES:
+        if t.startswith(prefix) and len(t) - len(prefix) >= 3:
+            t = t[len(prefix):]
+            break
+    for _ in range(2):  # two rounds: «دوستش» → «دوست» → «دوس» aligns with «دوست» → «دوس»
+        for suffix in _FA_STEM_SUFFIXES:
+            if t.endswith(suffix) and len(t) - len(suffix) >= 3:
+                t = t[: -len(suffix)]
+                break
+        else:
+            break
+    return t
+
+
+def _memory_token_match_weight(token: str, stem: str, memory_tokens: set[str], memory_stems: set[str]) -> float:
+    """Graded token match: exact > same stem > containment (compound words)."""
+    if token in memory_tokens:
+        return 1.0
+    if stem in memory_stems:
+        return 0.8
+    if len(token) >= 4:
+        for mem_token in memory_tokens:
+            if len(mem_token) >= 4 and (token in mem_token or mem_token in token):
+                return 0.6
+    return 0.0
+
+
 def delete_memory(owner_user_id: int, query: str) -> int:
     query_norm = _normalize_memory_text(query)
     query_tokens = _memory_tokens(query_norm)
@@ -675,10 +773,15 @@ def delete_memory(owner_user_id: int, query: str) -> int:
 
 
 def get_relevant_memories(owner_user_id: int, query: str, limit: int = MEMORY_MAX_RESULTS) -> list[dict]:
-    query_norm = _normalize_memory_text(query)
-    query_tokens = _memory_tokens(query_norm)
+    query_norm = _memory_match_normalize(query)
+    query_tokens = _memory_match_tokens(query)
     if not query_tokens:
         return []
+    query_token_set = set(query_tokens)
+    query_stems = {token: _memory_light_stem(token) for token in query_token_set}
+    # Consecutive query-token pairs reward phrase-level matches without
+    # requiring the full query to appear verbatim.
+    query_bigrams = {f"{a} {b}" for a, b in zip(query_tokens, query_tokens[1:])}
     timestamp = now()
     with db_lock:
         rows = db.execute("""
@@ -689,16 +792,23 @@ def get_relevant_memories(owner_user_id: int, query: str, limit: int = MEMORY_MA
         """, (owner_user_id, timestamp)).fetchall()
     scored = []
     for row in rows:
-        content_norm = _normalize_memory_text(row["content"])
-        memory_tokens = _memory_tokens(content_norm)
-        overlap = len(query_tokens & memory_tokens)
-        if not overlap:
+        content_norm = _memory_match_normalize(row["content"])
+        memory_tokens = set(_memory_match_tokens(content_norm))
+        memory_stems = {_memory_light_stem(token) for token in memory_tokens}
+        # Weighted overlap tolerates Persian affix variation («داری» ~ «دارم»)
+        # and compound words, instead of requiring identical surface tokens.
+        overlap = sum(
+            _memory_token_match_weight(token, query_stems[token], memory_tokens, memory_stems)
+            for token in query_token_set
+        )
+        if overlap <= 0.0:
             continue
-        coverage = overlap / max(1, len(query_tokens))
+        coverage = overlap / max(1, len(query_token_set))
         exact_bonus = 10.0 if query_norm in content_norm else 0.0
+        phrase_bonus = 2.0 if any(bigram in content_norm for bigram in query_bigrams) else 0.0
         age_days = max(0.0, (timestamp - int(row["updated_at"])) / 86400.0)
         recency = 2.0 / (1.0 + age_days / 30.0)
-        score = overlap * 4.0 + coverage * 6.0 + exact_bonus + int(row["importance"]) * 1.5 + float(row["confidence"]) * 2.0 + recency
+        score = overlap * 4.0 + coverage * 6.0 + exact_bonus + phrase_bonus + int(row["importance"]) * 1.5 + float(row["confidence"]) * 2.0 + recency
         scored.append((score, row))
     scored.sort(key=lambda x: (x[0], x[1]["importance"], x[1]["updated_at"]), reverse=True)
     selected = [dict(row) for _, row in scored[:limit]]
@@ -718,9 +828,12 @@ def extract_explicit_memories(owner_user_id: int, text: str) -> list[str]:
         return []
     candidates: list[tuple[str, str, int, float]] = []
     explicit_patterns = [
-        (r"(?:یادت باشه|یادت بمونه|یادت نره|یادآوری کن|یادت باشه که)\s*(.+)$", "explicit", 5, 1.0),
-        (r"(?:remember that|remember this|keep in mind that)\s*(.+)$", "explicit", 5, 1.0),
-        (r"(?:از این به بعد|ازین به بعد)\s*(.+)$", "preference", 4, 0.95),
+        # Persian: direct "remember / note this down" requests (highest confidence).
+        (r"(?:یادت(?:م)? باشه(?: که)?|یادت بمونه(?: که)?|یادت نره(?: که)?|یادم باشه(?: که)?|یادآوری کن(?: که)?|(?:اینو |این رو )?یادداشت کن(?: که)?|به خاطر بسپار(?: که)?)\s*(.+)$", "explicit", 5, 1.0),
+        # English: direct "remember / note this down" requests.
+        (r"(?:remember that|remember this|keep in mind(?: that)?|don'?t forget(?: that)?|note that|make a note(?: that)?)\s+(.+)$", "explicit", 5, 1.0),
+        # Standing instructions that change future behavior.
+        (r"(?:از این به بعد|ازین به بعد|از الان به بعد|از حالا به بعد|from now on)\s*(.+)$", "preference", 4, 0.95),
     ]
     for pattern, kind, importance, confidence in explicit_patterns:
         m = re.search(pattern, clean, flags=re.I)
@@ -729,11 +842,33 @@ def extract_explicit_memories(owner_user_id: int, text: str) -> list[str]:
             break
 
     preference_patterns = [
-        (r"(?:من|I)\s+(.+?)\s+(?:رو|را)?\s*(?:دوست دارم|خیلی دوست دارم|ترجیح میدم|ترجیح می دهم)", "preference"),
-        (r"(?:من|I)\s+(.+?)\s+(?:رو|را)?\s*(?:دوست ندارم|نمی پسندم|نمپسندم)", "preference"),
-        (r"(?:من|I)\s+(?:معمولاً|معمولا)\s*(.+)$", "preference"),
+        # Persian likes/dislikes with an explicit first-person construction.
+        (r"(?:من|I)\s+(.+?)\s+(?:رو|را)?\s*(?:خیلی\s+)?(?:دوست دارم|دوست ندارم|ترجیح میدم|ترجیح می‌دم|ترجیح می دهم|ترجیح میدهم|نمی پسندم|نمی‌پسندم|نمپسندم)", "preference"),
+        # Object-marker form: «X رو/را دوست دارم» is unambiguously first person.
+        (r"(.+?)\s+(?:رو|را)\s+(?:خیلی\s+)?(?:دوست دارم|دوست ندارم)", "preference"),
+        (r"(?:من\s+)?عاشق\s+(.+?)(?:\s+هستم|\s+ام|‌ام|م)\b", "preference"),
+        (r"از\s+(.+?)\s+(?:خیلی\s+)?خوشم (?:میاد|می‌آید|می آید|میآد)", "preference"),
+        (r"از\s+(.+?)\s+(?:خیلی\s+)?بدم (?:میاد|می‌آید|می آید|میآد)", "preference"),
+        (r"از\s+(.+?)\s+متنفرم\b", "preference"),
+        (r"حالم از\s+(.+?)\s+(?:بده|بد می‌شه|بد میشه|به هم می‌خوره|بهم می‌خوره|بهم میخوره)", "preference"),
+        (r"^(?:من\s+)?ترجیح می(?:‌| )?د(?:م|هم)\s+(.+)$", "preference"),
+        # Habits/routines. Bare sentence-initial forms must end in a first-person
+        # verb (…م) so third-person statements («همیشه اون دیر میاد») never match.
+        (r"(?:من|I)\s+معمولا(?:ً)?\s*(.+)$", "habit"),
+        (r"^معمولا(?:ً)?\s+(.+?م)$", "habit"),
+        (r"من\s+همیشه\s+(.+)$", "habit"),
+        (r"^همیشه\s+(.+?م)$", "habit"),
+        (r"من\s+(?:هیچ وقت|هیچ‌وقت|هیچوقت|هرگز)\s+(.+)$", "habit"),
+        (r"^(?:هیچ وقت|هیچ‌وقت|هیچوقت|هرگز)\s+(.+?م)$", "habit"),
+        # English first-person statements, anchored to stay high-confidence.
+        (r"^i\s+(?:really\s+)?(?:love|like|enjoy|prefer)\s+(.+)$", "preference"),
+        (r"^i\s+(?:really\s+)?(?:hate|dislike|can'?t stand)\s+(.+)$", "preference"),
+        (r"^i\s+(?:usually|always|never)\s+(.+)$", "habit"),
     ]
-    if not candidates:
+    # Questions are not explicit statements: «من قهوه دوست دارم؟» / "do I like X?"
+    # must not be stored. Direct remember-requests above are unaffected.
+    is_question = clean.endswith(("؟", "?"))
+    if not candidates and not is_question:
         for pattern, kind in preference_patterns:
             m = re.search(pattern, clean, flags=re.I)
             if m:
@@ -1132,7 +1267,7 @@ def _tool_web_search(args: dict) -> dict:
         pass
     country = str(args.get("country", WEB_SEARCH_COUNTRY) or "").strip().upper()
     language = str(args.get("language", WEB_SEARCH_LANGUAGE) or "").strip()
-    results, live_search = you_web_search(
+    results, live_search, search_error = you_web_search(
         query,
         result_count=count,
         force_fresh=bool(requested_freshness in {"day", "week", "month", "year"} or extraction_source == "fetch"),
@@ -1145,6 +1280,11 @@ def _tool_web_search(args: dict) -> dict:
         extraction_mode=extraction_mode,
         extraction_source=extraction_source,
     )
+    if search_error:
+        # Surface the real failure reason so the model does not mistake an
+        # unavailable search (quota, missing key, request failure) for a
+        # genuine "no results" outcome.
+        return {"ok": False, "error": search_error, "query": query, "results": []}
     compact = _compact_search_results(results)
     return {
         "ok": bool(compact),
@@ -1413,7 +1553,7 @@ def _tool_memory_search(args: dict) -> dict:
 
 
 def _tool_memory_save(args: dict) -> dict:
-    owner = int(args.get("_owner_user_id") or 0); content = str(args.get("content") or "").strip()[:MEMORY_WRITE_MAX_CONTENT_CHARS]
+    owner = int(args.get("_owner_user_id") or 0); content = str(args.get("content") or "").strip()[:MEMORY_MAX_CONTENT_CHARS]
     if not owner or not content: return {"ok":False,"error":"Memory save requires a valid user and content."}
     speaker = int(args.get("_speaker_user_id") or owner)
     resolved = memory_bridge.resolve_owner(speaker_user_id=speaker, explicit_owner_user_id=owner)
@@ -1707,16 +1847,19 @@ def should_web_search(text: str) -> bool:
 
 
 def build_search_query(text: str) -> str:
+    """Pass the model's query through almost untouched.
+
+    Gemini already writes a focused, self-contained query, so aggressive local
+    rewriting (hardcoded price boilerplate, broad date suffixes) hurts more
+    than it helps. The only light improvement kept: append today's date to
+    clearly time-sensitive queries (live prices) when no date is present yet.
+    """
     clean = re.sub(r"\s+", " ", text).strip()
     intent = search_intent(clean)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    asset = intent["asset"]
-    if asset == "دلار" and intent["price"]:
-        return f"{clean} قیمت دلار آمریکا دلار آزاد ایران امروز {today} تومان"[:2000]
-    if asset and intent["price"]:
-        return f"{clean} قیمت {asset} امروز {today}"[:2000]
-    if intent["current"]:
-        return f"{clean} today {today}"[:2000]
+    if intent["live_price"]:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if today not in clean:
+            return f"{clean} {today}"[:2000]
     return clean[:2000]
 
 
@@ -1866,10 +2009,17 @@ def you_web_search(
     language: Optional[str] = None,
     extraction_mode: Optional[str] = None,
     extraction_source: Optional[str] = None,
-) -> tuple[list[dict], bool]:
-    """You.com POST search with freshness, targeting, domain controls and token-efficient extraction."""
-    if not WEB_SEARCH_ENABLED or not YOU_API_KEY:
-        return [], False
+) -> tuple[list[dict], bool, Optional[str]]:
+    """You.com POST search with freshness, targeting, domain controls and token-efficient extraction.
+
+    Returns (results, live_search, error). ``error`` is a human-readable reason
+    when the search could not be performed, so the model is never left guessing
+    why no results came back.
+    """
+    if not WEB_SEARCH_ENABLED:
+        return [], False, "Web search is disabled in configuration."
+    if not YOU_API_KEY:
+        return [], False, "Web search is currently unavailable (missing API key or request failed)."
     intent = search_intent(query)
     search_query = build_search_query(query)
     force = force_fresh_search(query)
@@ -1894,10 +2044,10 @@ def you_web_search(
         cached = get_cached_web_search(cache_descriptor, cache_ttl)
         if cached is not None:
             logger.info("Web search cache hit | query=%r | ttl=%ss", query, cache_ttl)
-            return cached, False
+            return cached, False, None
     if WEB_SEARCH_DAILY_LIMIT == 0 or get_web_search_usage() >= WEB_SEARCH_DAILY_LIMIT:
         logger.warning("Web search daily limit reached; skipping search.")
-        return [], False
+        return [], False, "Daily web search quota has been reached. Cannot perform more searches today."
 
     count = min(max(int(result_count or WEB_SEARCH_MAX_RESULTS), 1), min(WEB_SEARCH_MAX_RESULTS, 100))
     payload: dict[str, object] = {"query": search_query, "count": count, "safesearch": WEB_SEARCH_SAFESEARCH}
@@ -1931,18 +2081,18 @@ def you_web_search(
         response = requests.post(YOU_SEARCH_URL, headers=you_search_headers(), json=payload, timeout=WEB_SEARCH_TIMEOUT)
     except requests.RequestException as exc:
         logger.warning("You.com search request failed: %s", exc)
-        return [], False
+        return [], False, "Web search is currently unavailable (missing API key or request failed)."
     latency_ms = int((time.monotonic() - started) * 1000)
     if response.status_code != 200:
         logger.warning("You.com search failed: status=%s latency_ms=%s body=%s", response.status_code, latency_ms, response.text[:500])
-        return [], False
+        return [], False, "Web search is currently unavailable (missing API key or request failed)."
     try:
         sections = response.json().get("results", {})
     except (ValueError, AttributeError):
         logger.warning("You.com returned invalid JSON.")
-        return [], False
+        return [], False, "Web search is currently unavailable (missing API key or request failed)."
     if not isinstance(sections, dict):
-        return [], False
+        return [], False, "Web search is currently unavailable (missing API key or request failed)."
 
     results: list[dict] = []
     seen_urls: set[str] = set()
@@ -1965,7 +2115,7 @@ def you_web_search(
     if not live_price and not force and not force_fresh:
         save_web_search_cache(cache_descriptor, results)
     logger.info("You.com search used | query=%r | results=%s | freshness=%s | extraction=%s | source=%s | latency_ms=%s | daily=%s/%s", query, len(results), freshness or "none", extraction_mode, extraction_source, latency_ms, get_web_search_usage(), WEB_SEARCH_DAILY_LIMIT)
-    return results, True
+    return results, True, None
 
 
 
@@ -2140,20 +2290,6 @@ def clean_model_answer(answer: str) -> str:
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
-
-
-def build_sources_message(results: list[dict]) -> str:
-    if not results:
-        return ""
-    lines = ["🔎 <b>منابع وب</b>"]
-    for item in results:
-        title = html.escape(str(item.get("title", "منبع")))
-        url = html.escape(str(item.get("url", "")), quote=True)
-        if url:
-            lines.append(f'• <a href="{url}">{title}</a>')
-        else:
-            lines.append(f"• {title}")
-    return "\n".join(lines)
 
 
 async def send_long_message(update: Update, text: str) -> None:
@@ -2407,6 +2543,151 @@ async def stats_command(
         f"جستجوی وب امروز: {get_web_search_usage()}/{WEB_SEARCH_DAILY_LIMIT}\n"
         f"تعداد حافظه‌های بلندمدت: {len(get_memory_list(user_id, 1000))}"
     )
+
+
+# ---------- Group access control ----------
+# Private chats are always allowed. Groups/supergroups must be whitelisted in
+# the allowed_groups table; everything else gets complete silence.
+
+
+def get_allowed_groups() -> list[sqlite3.Row]:
+    with db_lock:
+        rows = db.execute(
+            "SELECT chat_id, title, added_at FROM allowed_groups ORDER BY added_at"
+        ).fetchall()
+    return list(rows)
+
+
+def is_group_allowed(chat_id: int, title: str = "") -> bool:
+    """Return True when the group is whitelisted; refresh its stored title."""
+    with db_lock:
+        row = db.execute(
+            "SELECT title FROM allowed_groups WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if title and title != row["title"]:
+            db.execute(
+                "UPDATE allowed_groups SET title = ? WHERE chat_id = ?",
+                (title, chat_id),
+            )
+            db.commit()
+    return True
+
+
+def add_allowed_group(chat_id: int, title: str = "") -> None:
+    with db_lock:
+        db.execute(
+            """
+            INSERT INTO allowed_groups (chat_id, title, added_at) VALUES (?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                title = CASE WHEN excluded.title != '' THEN excluded.title ELSE allowed_groups.title END
+            """,
+            (chat_id, title, now()),
+        )
+        db.commit()
+
+
+def remove_allowed_group(chat_id: int) -> bool:
+    with db_lock:
+        cursor = db.execute("DELETE FROM allowed_groups WHERE chat_id = ?", (chat_id,))
+        db.commit()
+    return cursor.rowcount > 0
+
+
+async def group_access_guard(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Silently drop every update from a non-whitelisted group.
+
+    Registered in handler group -1, so it runs before all commands and the
+    message handler. Raising ApplicationHandlerStop blocks the entire pipeline:
+    no reply, no reaction, no memory, no tools, no Gemini call.
+    """
+    if not isinstance(update, Update):
+        return
+    chat = update.effective_chat
+    if chat is None or chat.type not in {"group", "supergroup"}:
+        return  # Private chats (and anything non-group) are never restricted.
+    if is_group_allowed(chat.id, chat.title or ""):
+        return
+    logger.info(
+        "Unauthorized group ignored | chat=%s title=%r (whitelist via /settings add %s)",
+        chat.id, chat.title, chat.id,
+    )
+    raise ApplicationHandlerStop
+
+
+async def settings_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Owner-only access-control settings: list/add/remove allowed groups."""
+    if not update.message:
+        return
+    if not is_founder(update):
+        await update.message.reply_text("Access denied.")
+        return
+
+    args = list(context.args or [])
+    action = args[0].lower() if args else ""
+
+    if action in {"add", "remove"}:
+        if len(args) < 2:
+            await update.message.reply_text(
+                "فرمت درست:\n/settings add <chat_id>\n/settings remove <chat_id>"
+            )
+            return
+        try:
+            chat_id = int(args[1])
+        except ValueError:
+            await update.message.reply_text(
+                "Chat ID باید یک عدد باشد (مثلاً -1001234567890)."
+            )
+            return
+        if action == "add":
+            title = ""
+            try:
+                chat = await context.bot.get_chat(chat_id)
+                title = chat.title or ""
+            except TelegramError:
+                # The bot may not be in the group yet; the title is refreshed
+                # automatically on the first allowed message.
+                pass
+            add_allowed_group(chat_id, title)
+            shown = f"{title} — {chat_id}" if title else str(chat_id)
+            await update.message.reply_text(f"✅ گروه به لیست مجاز اضافه شد:\n{shown}")
+        else:
+            if remove_allowed_group(chat_id):
+                await update.message.reply_text(f"🗑 گروه از لیست مجاز حذف شد: {chat_id}")
+            else:
+                await update.message.reply_text(f"این Chat ID در لیست مجاز نبود: {chat_id}")
+        return
+
+    groups = get_allowed_groups()
+    lines = [
+        "⚙️ تنظیمات کنترل دسترسی",
+        "",
+        "وضعیت: فعال",
+        "• چت خصوصی: برای همه آزاد",
+        "• گروه‌ها: فقط گروه‌های داخل لیست مجاز (بقیه سکوت کامل)",
+        f"• تعداد گروه‌های مجاز: {len(groups)}",
+    ]
+    if groups:
+        lines.append("")
+        lines.append("گروه‌های مجاز:")
+        for row in groups:
+            title = row["title"] or "بدون عنوان"
+            lines.append(f"• {title} — {row['chat_id']}")
+    lines += [
+        "",
+        "دستورها:",
+        "/settings — نمایش همین وضعیت و لیست",
+        "/settings add <chat_id> — افزودن گروه",
+        "/settings remove <chat_id> — حذف گروه",
+    ]
+    await update.message.reply_text("\n".join(lines))
 
 
 def is_group(update: Update) -> bool:
@@ -2863,7 +3144,6 @@ async def message_handler(
     temp_document_path: Optional[str] = None
     reply_context = build_reply_context(update.message.reply_to_message)
     try:
-        web_results: list[dict] = []
         youtube_url = extract_youtube_url(text)
         active_video_url = youtube_url
         if not active_video_url and not image_requested and looks_like_video_followup(text):
@@ -2963,21 +3243,6 @@ async def message_handler(
             file_context=file_context,
         )
 
-        source_map: dict[str, dict] = {}
-        for event in tool_events:
-            result = event.get("result") or {}
-            if event.get("tool") == "web_search" and result.get("results"):
-                for item in result["results"]:
-                    url = str(item.get("url") or "").strip()
-                    if url and url not in source_map:
-                        source_map[url] = item
-            elif event.get("tool") == "web_open" and result.get("pages"):
-                for page in result["pages"]:
-                    url = str(page.get("url") or "").strip()
-                    if url and url not in source_map:
-                        source_map[url] = {"title": page.get("title") or "منبع بازشده", "url": url}
-        web_results = list(source_map.values())[:15]
-
         answer = clean_model_answer(answer)
 
         add_message(history_id, "user", saved_user_content)
@@ -3002,13 +3267,6 @@ async def message_handler(
                 asyncio.to_thread(compact_conversation_context, history_id, model),
                 name="conversation-compaction",
             )
-        if web_results:
-            await update.message.reply_text(
-                build_sources_message(web_results),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-
         if usage and usage.get("total_tokens") is not None:
             logger.info(
                 "chat=%s model=%s total_tokens=%s",
@@ -3109,6 +3367,12 @@ def build_application() -> Application:
         .build()
     )
 
+    # Access control runs first (group -1): updates from non-whitelisted
+    # groups are dropped before any command or message handler can react.
+    application.add_handler(
+        TypeHandler(Update, group_access_guard), group=-1
+    )
+
     application.add_handler(
         CommandHandler("start", start_command)
     )
@@ -3135,6 +3399,9 @@ def build_application() -> Application:
     )
     application.add_handler(
         CommandHandler("forget", forget_command)
+    )
+    application.add_handler(
+        CommandHandler("settings", settings_command)
     )
     application.add_handler(
         MessageHandler(

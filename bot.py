@@ -2275,12 +2275,12 @@ async def model_command(
     if not update.effective_user or not update.message:
         return
 
-    user_id = update.effective_user.id
+    history_id = conversation_key(update)
     args = context.args
 
     if not args:
         await update.message.reply_text(
-            f"🤖 مدل فعلی:\n{get_user_model(user_id)}\n\n"
+            f"🤖 مدل فعلی:\n{get_user_model(history_id)}\n\n"
             f"برای تغییر:\n/model model-name"
         )
         return
@@ -2310,7 +2310,7 @@ async def model_command(
         )
         return
 
-    set_user_model(user_id, new_model)
+    set_user_model(history_id, new_model)
     await update.message.reply_text(f"✅ مدل تغییر کرد به:\n{new_model}")
 
 
@@ -3095,7 +3095,10 @@ def validate_gemini_connection() -> None:
 
 def migrate_models_to_gemini() -> None:
     with db_lock:
-        db.execute("UPDATE conversations SET model = ? WHERE model != ?", (GEMINI_MODEL, GEMINI_MODEL))
+        db.execute(
+            "UPDATE conversations SET model = ? WHERE model IS NULL OR model = '' OR model = 'None'",
+            (GEMINI_MODEL,),
+        )
         db.commit()
 
 

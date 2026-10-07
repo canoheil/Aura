@@ -1704,7 +1704,7 @@ def ask_gemini(model: str, messages: list[dict], owner_user_id: Optional[int] = 
             result = AGENT_RUNNER.execute_tool(state, name, args)
             contents.append(
                 types.Content(
-                    role="tool",
+                    role="user",
                     parts=[
                         types.Part.from_function_response(
                             name=name,

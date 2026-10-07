@@ -215,6 +215,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger("aura-telegram-bot")
 
 SYSTEM_PROMPT = f"""
@@ -1614,12 +1616,13 @@ def _build_send_sticker_declaration() -> types.FunctionDeclaration:
     return types.FunctionDeclaration(
         name="send_sticker",
         description=(
-            "Send one of Aura's personal stickers alongside the text reply. Use rarely "
-            "(roughly one reply in five or fewer) and only when a sticker clearly adds "
-            "emotion or humor; never for serious, technical, or sensitive topics. The "
-            "sticker is delivered after the text reply, so always write a text reply too. "
-            "Set user_requested=true only when the user explicitly asked for a sticker "
-            "in the current message."
+            "Send one of Aura's personal stickers alongside the text reply. "
+            "If the user explicitly asked for a sticker, always send one "
+            "(user_requested=true) and choose the closest tag. A matching sticker "
+            "is appropriate for a clear joke, emotion, or reaction; skip ordinary "
+            "neutral messages; never send for technical, serious, or sensitive topics. "
+            "At most one sticker per reply; always write a text reply too. "
+            "Choose the tag by meaning or situation; do not rotate tags artificially."
         ),
         parameters_json_schema={
             "type": "object",
@@ -3170,10 +3173,12 @@ def _stickers_prompt_section() -> str:
     lines = [
         "Stickers:",
         "- Aura has a small personal sticker pack and can send one sticker via the send_sticker tool.",
-        "- Use stickers rarely (roughly one reply in five or fewer) and only when a sticker truly adds emotion or humor.",
-        "- Never use stickers for serious, technical, or sensitive topics, and never in every message.",
-        "- If the user explicitly asks for a sticker (for example «استیکر بفرست» or «یه استیکر خنده»), always call send_sticker with user_requested=true and choose the closest tag; if nothing fits well, pick the closest one and say so playfully.",
-        "- The sticker is sent alongside the text reply, so always write a normal text reply too.",
+        "- If the user explicitly asks for a sticker (for example «استیکر بفرست» or «یه استیکر خنده»), always call send_sticker with user_requested=true and choose the closest tag.",
+        "- A matching sticker is appropriate for a clear joke, emotion, or reaction moment.",
+        "- Ordinary neutral messages usually get no sticker.",
+        "- Never send a sticker for technical, serious, or sensitive topics.",
+        "- At most one sticker per reply; always write a normal text reply too.",
+        "- Choose the tag by meaning or situation; do not rotate tags artificially.",
         "- If the tool fails or is unavailable, continue with the text reply only and do not mention stickers.",
         "- Available stickers (tag: when to use):",
     ]

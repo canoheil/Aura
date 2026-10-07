@@ -290,3 +290,50 @@ def test_bot_imports_sticker_manager_singleton():
 
 def test_bot_declares_sticker_cache_table():
     assert "CREATE TABLE IF NOT EXISTS sticker_cache" in _bot_source()
+
+
+def test_bot_sets_httpx_and_httpcore_loggers_to_warning():
+    """bot.py must quiet httpx/httpcore so Telegram URLs (and the bot token) stay out of INFO logs."""
+    source = _bot_source()
+    tree = ast.parse(source)
+    quieted = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.For):
+            continue
+        if not isinstance(node.iter, (ast.Tuple, ast.List)):
+            continue
+        names = [
+            elt.value
+            for elt in node.iter.elts
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+        ]
+        if "httpx" not in names or "httpcore" not in names:
+            continue
+        for stmt in ast.walk(node):
+            if not isinstance(stmt, ast.Call):
+                continue
+            if not (isinstance(stmt.func, ast.Attribute) and stmt.func.attr == "setLevel"):
+                continue
+            if not stmt.args:
+                continue
+            level = stmt.args[0]
+            is_warning = (
+                isinstance(level, ast.Attribute) and level.attr == "WARNING"
+            ) or (
+                isinstance(level, ast.Constant) and level.value in (30, "WARNING")
+            )
+            if is_warning:
+                quieted.update(names)
+    assert {"httpx", "httpcore"} <= quieted
+
+
+def test_bot_sticker_guidance_drops_one_in_five_quota():
+    source = _bot_source()
+    lowered = source.lower()
+    assert "one reply in five" not in lowered
+    assert "one in five" not in lowered
+    start = source.index("def _stickers_prompt_section")
+    rest = source[start:]
+    end = rest.find("\ndef ", 1)
+    section = rest if end < 0 else rest[:end]
+    assert "user_requested=true" in section

@@ -21,6 +21,7 @@ from urllib.parse import urlparse, parse_qs
 
 from tool_system import AgentRunState, AgentRunner, ToolRegistry
 from reaction_manager import reaction_manager
+from sticker_manager import sticker_manager
 from reply_context import (
     build_reply_context,
     build_request_with_reply_context,
@@ -45,7 +46,7 @@ import requests
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from telegram import ReactionTypeEmoji, Update
+from telegram import Bot, ReactionTypeEmoji, Update
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import (
@@ -134,6 +135,24 @@ MEMORY_MAX_RESULTS = 8
 MEMORY_MAX_CONTENT_CHARS = 800
 MEMORY_MIN_QUERY_TOKEN_LEN = 2
 memory_bridge = MemoryBridge()
+
+# Smart sticker sending (Stage 21). The model only ever sees English tags from
+# stickers_config.json; Telegram file_ids stay inside sticker_manager/bot.py.
+STICKERS_ENABLED = os.getenv("STICKERS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+STICKER_SET_NAME = os.getenv("STICKER_SET_NAME", "").strip()
+try:
+    STICKER_COOLDOWN_SECONDS = int(os.getenv("STICKER_COOLDOWN_SECONDS", "60"))
+    STICKER_GROUP_COOLDOWN_SECONDS = int(os.getenv("STICKER_GROUP_COOLDOWN_SECONDS", "120"))
+except ValueError as exc:
+    raise RuntimeError("STICKER_COOLDOWN_SECONDS and STICKER_GROUP_COOLDOWN_SECONDS must be integers.") from exc
+if STICKER_COOLDOWN_SECONDS < 0 or STICKER_GROUP_COOLDOWN_SECONDS < 0:
+    raise RuntimeError("Sticker cooldowns cannot be negative")
+STICKER_TOOL_MAX_CALLS = max(1, int(os.getenv("STICKER_TOOL_MAX_CALLS", "1")))
+# bot.py validated the cooldowns fail-fast; push them into the offline-safe singleton.
+sticker_manager.configure(
+    cooldown_seconds=STICKER_COOLDOWN_SECONDS,
+    group_cooldown_seconds=STICKER_GROUP_COOLDOWN_SECONDS,
+)
 
 MEMORY_STOPWORDS = {"و", "در", "به", "از", "که", "این", "را", "با", "برای", "یک", "است", "شده", "هم", "تا", "یا", "اما", "اگر", "چون", "the", "a", "an", "is", "are", "was", "were", "be", "to", "of", "in", "for", "on", "with", "at", "by", "from", "and", "or", "but", "not", "this", "that", "it", "as"}
 VIDEO_CONTEXT_TTL = 30 * 60
@@ -427,6 +446,20 @@ with db_lock:
         )
         """
     )
+    # Cache of the last known sticker file_ids per pack position. Telegram stays
+    # the source of truth at startup; this is only the fallback when
+    # get_sticker_set() temporarily fails. Additive, preserves existing bot.db.
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sticker_cache (
+            file_unique_id TEXT PRIMARY KEY,
+            set_name TEXT NOT NULL DEFAULT '',
+            position INTEGER NOT NULL,
+            file_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     db.commit()
 
 
@@ -590,6 +623,11 @@ def build_system_prompt(update: Optional[Update] = None) -> str:
     prompt = SYSTEM_PROMPT + "\n\n" + aura_identity.system_context(FOUNDER_USER_ID)
     prompt += "\n\n" + AuraSelfIdentityBoundary().system_context()
     prompt += "\n\n" + AuraPersonalityBoundary().system_context()
+
+    # Sticker guidance is dynamic: it disappears automatically when the pack
+    # fails to load, so the model is never told about an unavailable tool.
+    if STICKERS_ENABLED and sticker_manager.is_ready():
+        prompt += "\n\n" + _stickers_prompt_section()
 
     if FOUNDER_USER_ID:
         prompt += f"""\n\nFounder relationship (internal context):
@@ -1572,6 +1610,72 @@ def _tool_memory_forget(args: dict) -> dict:
     if not owner or not query: return {"ok":False,"error":"Memory forget requires a valid user and query."}
     return {"ok":True,"deactivated":delete_memory(owner, query)}
 
+def _build_send_sticker_declaration() -> types.FunctionDeclaration:
+    return types.FunctionDeclaration(
+        name="send_sticker",
+        description=(
+            "Send one of Aura's personal stickers alongside the text reply. Use rarely "
+            "(roughly one reply in five or fewer) and only when a sticker clearly adds "
+            "emotion or humor; never for serious, technical, or sensitive topics. The "
+            "sticker is delivered after the text reply, so always write a text reply too. "
+            "Set user_requested=true only when the user explicitly asked for a sticker "
+            "in the current message."
+        ),
+        parameters_json_schema={
+            "type": "object",
+            "properties": {
+                "tag": {
+                    "type": "string",
+                    "description": "Sticker to send, chosen from Aura's fixed sticker tags.",
+                    "enum": list(sticker_manager.tags()),
+                },
+                "user_requested": {
+                    "type": "boolean",
+                    "description": "true only if the user explicitly asked for a sticker in this message.",
+                },
+            },
+            "required": ["tag"],
+        },
+    )
+
+
+def _sticker_tool_failure(reason: str) -> dict:
+    return {
+        "ok": False,
+        "reason": reason,
+        "instruction": "Continue with a normal text reply only and do not mention stickers.",
+    }
+
+
+def _tool_send_sticker(args: dict) -> dict:
+    """Queue one sticker for delivery after the text reply.
+
+    Runs in a worker thread inside the agent loop, so it never sends anything
+    itself; message_handler performs the actual reply_sticker call from the
+    returned tool events. Reservation happens here so the model gets an
+    immediate, honest answer about cooldowns.
+    """
+    if not STICKERS_ENABLED or not sticker_manager.is_ready():
+        return _sticker_tool_failure("Sticker sending is currently disabled.")
+    tag = str(args.get("tag") or "").strip()
+    if not tag or tag not in sticker_manager.tags():
+        return _sticker_tool_failure(f"Unknown sticker tag: {tag or '(empty)'}.")
+    if sticker_manager.get(tag) is None:
+        return _sticker_tool_failure("This sticker is temporarily unavailable.")
+    chat_id = args.get("_chat_id")
+    user_id = args.get("_user_id")
+    if not isinstance(chat_id, int) or not isinstance(user_id, int):
+        return _sticker_tool_failure("Sticker sending is not available in this context.")
+    allowed, reason = sticker_manager.check_and_reserve(
+        chat_id=chat_id,
+        user_id=user_id,
+        is_group=bool(args.get("_is_group", False)),
+        explicit=bool(args.get("user_requested", False)),
+    )
+    if not allowed:
+        return _sticker_tool_failure(reason)
+    return {"ok": True, "tag": tag, "note": "Sticker queued; it will be sent after your text reply."}
+
 
 def _create_tool_registry() -> ToolRegistry:
     registry = ToolRegistry()
@@ -1581,6 +1685,12 @@ def _create_tool_registry() -> ToolRegistry:
     registry.register(name="memory_search", declaration=_build_memory_search_declaration(), handler=_tool_memory_search, max_calls_per_run=MEMORY_TOOL_MAX_CALLS)
     registry.register(name="memory_save", declaration=_build_memory_save_declaration(), handler=_tool_memory_save, max_calls_per_run=1)
     registry.register(name="memory_forget", declaration=_build_memory_forget_declaration(), handler=_tool_memory_forget, max_calls_per_run=1)
+    # Registered at import time when the offline config is valid: the tool schema
+    # only needs tags from stickers_config.json, never Telegram data. File_ids
+    # arrive later in post_init; until then (or after a registry failure) the
+    # handler answers "disabled" and the model simply continues with text.
+    if STICKERS_ENABLED and sticker_manager.is_configured():
+        registry.register(name="send_sticker", declaration=_build_send_sticker_declaration(), handler=_tool_send_sticker, max_calls_per_run=STICKER_TOOL_MAX_CALLS)
     return registry
 
 
@@ -1594,7 +1704,7 @@ def _tool_response_payload(value: object) -> dict:
     return {"result": value}
 
 
-def ask_gemini(model: str, messages: list[dict], owner_user_id: Optional[int] = None, file_context: Optional[dict] = None) -> tuple[str, Optional[dict], list[dict]]:
+def ask_gemini(model: str, messages: list[dict], owner_user_id: Optional[int] = None, file_context: Optional[dict] = None, extra_context: Optional[dict] = None) -> tuple[str, Optional[dict], list[dict]]:
     """Run one bounded Aura agent task using Gemini function calling.
 
     Gemini decides whether/which tool to call and when the task is complete.
@@ -1614,6 +1724,10 @@ def ask_gemini(model: str, messages: list[dict], owner_user_id: Optional[int] = 
     runtime_context = {"owner_user_id": owner_user_id} if owner_user_id else {}
     if file_context:
         runtime_context.update(file_context)
+    if extra_context:
+        # Private per-request values (chat/user IDs for stickers). AgentRunner
+        # injects them as _-prefixed keys, never exposed in Gemini's tool schema.
+        runtime_context.update(extra_context)
     state = AgentRunState(runtime_context=runtime_context)
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     usage_seen = False
@@ -3045,6 +3159,205 @@ async def _safe_reply_text(update: Update, text: str) -> bool:
         return False
 
 
+# ---------- Smart sticker sending ----------
+# The model only chooses a tag through the send_sticker tool; the tool handler
+# validates and reserves it (worker thread, no I/O to Telegram). Delivery
+# happens here, after the text reply, so a sticker failure can never break or
+# hide Aura's answer — the same principle as reactions.
+
+def _stickers_prompt_section() -> str:
+    """Short English sticker guidance appended to the system prompt when active."""
+    lines = [
+        "Stickers:",
+        "- Aura has a small personal sticker pack and can send one sticker via the send_sticker tool.",
+        "- Use stickers rarely (roughly one reply in five or fewer) and only when a sticker truly adds emotion or humor.",
+        "- Never use stickers for serious, technical, or sensitive topics, and never in every message.",
+        "- If the user explicitly asks for a sticker (for example «استیکر بفرست» or «یه استیکر خنده»), always call send_sticker with user_requested=true and choose the closest tag; if nothing fits well, pick the closest one and say so playfully.",
+        "- The sticker is sent alongside the text reply, so always write a normal text reply too.",
+        "- If the tool fails or is unavailable, continue with the text reply only and do not mention stickers.",
+        "- Available stickers (tag: when to use):",
+    ]
+    lines.extend(f"  - {line}" for line in sticker_manager.describe_for_prompt().splitlines())
+    return "\n".join(lines)
+
+
+def _resolved_sticker_set_name() -> str:
+    """Return the pack name: env override first, then stickers_config.json."""
+    return STICKER_SET_NAME or sticker_manager.set_name
+
+
+def save_sticker_cache(set_name: str, items: list[tuple[str, int, str]]) -> None:
+    """Persist the latest (file_unique_id, position, file_id) triples as offline fallback."""
+    updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with db_lock:
+        db.executemany(
+            """
+            INSERT INTO sticker_cache (file_unique_id, set_name, position, file_id, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(file_unique_id) DO UPDATE SET
+                set_name = excluded.set_name,
+                position = excluded.position,
+                file_id = excluded.file_id,
+                updated_at = excluded.updated_at
+            """,
+            [(uid, set_name, position, fid, updated_at) for uid, position, fid in items],
+        )
+        # Stale rows from a previous pack must never mix into the fallback.
+        db.execute("DELETE FROM sticker_cache WHERE set_name != ?", (set_name,))
+        db.commit()
+
+
+def load_sticker_cache(set_name: str) -> list[tuple[str, str]]:
+    """Return cached (file_unique_id, file_id) pairs ordered by pack position."""
+    with db_lock:
+        rows = db.execute(
+            "SELECT file_unique_id, file_id FROM sticker_cache WHERE set_name = ? ORDER BY position ASC",
+            (set_name,),
+        ).fetchall()
+    return [(row["file_unique_id"], row["file_id"]) for row in rows]
+
+
+async def _fetch_sticker_registry(bot: Bot, set_name: str) -> bool:
+    """Fetch the pack from Telegram, apply it to sticker_manager, refresh the cache."""
+    try:
+        sticker_set = await bot.get_sticker_set(set_name)
+    except TelegramError as exc:
+        logger.warning("Sticker set fetch failed | set=%s | %s", set_name, exc)
+        return False
+    stickers = list(getattr(sticker_set, "stickers", None) or [])
+    items = [(str(sticker.file_unique_id), str(sticker.file_id)) for sticker in stickers]
+    if not sticker_manager.set_registry(items):
+        return False
+    save_sticker_cache(
+        set_name,
+        [(uid, position, fid) for position, (uid, fid) in enumerate(items, start=1)],
+    )
+    # One line per sticker so the owner can verify the position→tag mapping.
+    for position, sticker in enumerate(stickers, start=1):
+        entry = sticker_manager.entry_at_position(position)
+        logger.info(
+            "Sticker registry | position=%s | tag=%s | file_unique_id=%s | emoji=%s",
+            position,
+            entry.tag if entry else "(unmapped)",
+            sticker.file_unique_id,
+            getattr(sticker, "emoji", "") or "",
+        )
+    return True
+
+
+async def load_sticker_registry(application: Application) -> None:
+    """post_init hook: load the pack once; any failure never blocks startup."""
+    if not STICKERS_ENABLED:
+        return
+    if not sticker_manager.is_configured():
+        logger.warning(
+            "Sticker config invalid or missing; smart sticker sending disabled | error=%s",
+            sticker_manager.config_error or "unknown",
+        )
+        return
+    set_name = _resolved_sticker_set_name()
+    if not set_name:
+        logger.warning("Sticker set name is empty; smart sticker sending disabled.")
+        return
+    try:
+        if await _fetch_sticker_registry(application.bot, set_name):
+            logger.info("Sticker registry loaded from Telegram | set=%s", set_name)
+            return
+        cached = load_sticker_cache(set_name)
+        if cached and sticker_manager.set_registry(cached):
+            logger.warning(
+                "Sticker registry restored from sticker_cache | set=%s | stickers=%s",
+                set_name,
+                len(cached),
+            )
+            return
+        logger.warning(
+            "Sticker registry unavailable; smart sticker sending disabled for this run | set=%s | registry_error=%s",
+            set_name,
+            sticker_manager.registry_error or "unknown",
+        )
+    except Exception:
+        # Startup must never depend on the sticker pack.
+        logger.exception("Sticker registry load failed unexpectedly; smart sticker sending disabled | set=%s", set_name)
+
+
+_sticker_refresh_running = False
+
+
+async def refresh_sticker_registry(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Lazy refresh after a stale file_id; runs as a best-effort background task.
+
+    The repo has no job_queue/scheduler dependency, so instead of a 6-hour job
+    the pack is refreshed on demand when Telegram rejects a cached file_id.
+    """
+    global _sticker_refresh_running
+    if _sticker_refresh_running:
+        return
+    if not STICKERS_ENABLED or not sticker_manager.is_configured():
+        return
+    _sticker_refresh_running = True
+    try:
+        set_name = _resolved_sticker_set_name()
+        if await _fetch_sticker_registry(context.bot, set_name):
+            logger.info("Sticker registry refreshed lazily | set=%s", set_name)
+    finally:
+        _sticker_refresh_running = False
+
+
+def _pending_sticker_tag(tool_events: list[dict]) -> Optional[str]:
+    """Return the first successfully queued sticker tag from agent tool events.
+
+    Event structure (tool_system.AgentRunner): {"tool": name, "result": {...}},
+    optionally with "cached": True for duplicate calls. At most one sticker is
+    delivered per reply even if the model queued several.
+    """
+    for event in tool_events or []:
+        if not isinstance(event, dict) or event.get("tool") != "send_sticker":
+            continue
+        result = event.get("result")
+        if isinstance(result, dict) and result.get("ok") is True:
+            tag = result.get("tag")
+            if isinstance(tag, str) and tag:
+                return tag
+    return None
+
+
+async def _send_queued_sticker(update: Update, tag: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send one queued sticker after the text reply; failures never break the reply."""
+    if not update.message:
+        return
+    entry = sticker_manager.get(tag)
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if entry is None:
+        logger.warning("Sticker send skipped; registry entry missing | chat=%s | tag=%s", chat_id, tag)
+        return
+    try:
+        await update.message.reply_sticker(sticker=entry.file_id)
+        logger.info(
+            "Sticker sent | chat=%s | tag=%s | file_unique_id=%s | message=%s",
+            chat_id, tag, entry.file_unique_id, update.message.message_id,
+        )
+    except RetryAfter as exc:
+        await asyncio.sleep(float(exc.retry_after))
+        try:
+            await update.message.reply_sticker(sticker=entry.file_id)
+            logger.info("Sticker sent after rate-limit wait | chat=%s | tag=%s", chat_id, tag)
+        except TelegramError as retry_exc:
+            logger.warning("Sticker send failed after retry | chat=%s | tag=%s | %s", chat_id, tag, retry_exc)
+    except BadRequest as exc:
+        # Stale/deleted file_id: drop the entry and lazily refresh the pack.
+        sticker_manager.invalidate(entry.file_unique_id)
+        logger.warning(
+            "Sticker rejected by Telegram; entry invalidated | chat=%s | tag=%s | file_unique_id=%s | %s",
+            chat_id, tag, entry.file_unique_id, exc,
+        )
+        _create_background_task(refresh_sticker_registry(context), name="sticker-registry-refresh")
+    except Forbidden as exc:
+        logger.info("Sticker send forbidden | chat=%s | tag=%s | %s", chat_id, tag, exc)
+    except TelegramError as exc:
+        logger.warning("Sticker send failed | chat=%s | tag=%s | %s", chat_id, tag, exc)
+
+
 async def message_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -3235,20 +3548,43 @@ async def message_handler(
             # build_request_with_reply_context() already appended the current user
             # message. Do not append it again: that would send the same message twice.
 
+        # Private runtime context for the send_sticker tool. Like file paths,
+        # these values never appear in Gemini's tool schema.
+        sticker_context: dict = {}
+        if STICKERS_ENABLED and sticker_manager.is_configured():
+            sticker_context = {
+                "chat_id": update.effective_chat.id,
+                "user_id": update.effective_user.id,
+                "is_group": is_group(update),
+            }
+
         answer, usage, tool_events = await asyncio.to_thread(
             ask_gemini,
             model,
             request_messages,
             update.effective_user.id if update.effective_user else None,
             file_context=file_context,
+            extra_context=sticker_context or None,
         )
 
         answer = clean_model_answer(answer)
 
+        # A queued sticker is delivered right after the text reply. The history
+        # marker keeps later turns aware that this reply already had a sticker.
+        sticker_tag = _pending_sticker_tag(tool_events) if STICKERS_ENABLED else None
+
         add_message(history_id, "user", saved_user_content)
-        add_message(history_id, "assistant", answer)
+        if sticker_tag:
+            add_message(history_id, "assistant", f"{answer} [sticker sent: {sticker_tag}]")
+        else:
+            add_message(history_id, "assistant", answer)
 
         await send_long_message(update, answer)
+
+        if sticker_tag:
+            # Inline (not a background task): the reservation already happened,
+            # and a sticker failure here is logged and swallowed, never raised.
+            await _send_queued_sticker(update, sticker_tag, context)
 
         # Optional semantic reaction runs after the reply, so it never adds
         # latency to Aura's normal response. High-confidence reactions were
@@ -3364,6 +3700,9 @@ def build_application() -> Application:
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
+        # Loads the sticker pack once after initialize(); failures only disable
+        # smart sticker sending and never block startup or polling.
+        .post_init(load_sticker_registry)
         .build()
     )
 

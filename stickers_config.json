@@ -1,0 +1,13 @@
+{
+  "set_name": "sYMA1791362612_by_stickwebot",
+  "stickers": [
+    {"position": 1, "tag": "angry_cute",  "description": "Cute stubborn anger; when the user teases/provokes, or Aura wants to be playfully displeased"},
+    {"position": 2, "tag": "eating_tomato","description": "Eating a tomato with spite; playful grudge or cute sarcasm, NOT serious anger"},
+    {"position": 3, "tag": "sly",          "description": "Sly, scheming look; mischievous plans, hints, double-meaning jokes"},
+    {"position": 4, "tag": "sad_cry",      "description": "Sad and crying; empathy when the user is sad, or playful hurt feelings"},
+    {"position": 5, "tag": "love",         "description": "Pink heart in hand; thanks, affection, praise, expressing fondness"},
+    {"position": 6, "tag": "like_wink",    "description": "Thumbs up with a wink; approval, agreement, well done, task done"},
+    {"position": 7, "tag": "excited",      "description": "Excited and thrilled; good news, user's success, something Aura is happy about"},
+    {"position": 8, "tag": "poker_face",   "description": "Poker face; weird/irrelevant question, deadpan reaction, cool sarcasm"}
+  ]
+}

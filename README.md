@@ -12,6 +12,7 @@ This repository contains the public application code and configuration template.
 - Guarded You.com web search
 - Group-chat triggers and speaker awareness
 - Telegram image handling / vision input
+- Smart sticker sending (model-chosen tags from a personal sticker pack, with cooldowns)
 - Configurable model and search settings
 - Environment-based secrets and configuration
 
@@ -61,6 +62,16 @@ GEMINI_MODEL=gemini-3.1-flash-lite
 - `WEB_SEARCH_TIMEOUT`
 - `MAX_HISTORY_MESSAGES`
 - `REQUEST_TIMEOUT`
+- `STICKERS_ENABLED`
+- `STICKER_SET_NAME`
+- `STICKER_CONFIG_PATH`
+- `STICKER_COOLDOWN_SECONDS`
+- `STICKER_GROUP_COOLDOWN_SECONDS`
+- `STICKER_TOOL_MAX_CALLS`
+
+## Stickers
+
+Smart sticker sending maps English tags from `stickers_config.json` (committed, no secrets) onto a Telegram sticker pack fetched with `getStickerSet` at startup. Sticker `file_id`s are cached in `bot.db` (`sticker_cache`) only as a fallback and are never exposed to the model. If the pack cannot be loaded, the feature disables itself and normal text replies continue.
 
 ## Run
 

@@ -7,6 +7,7 @@ also runs under a plain function runner.
 import ast
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -261,6 +262,69 @@ def _bot_source():
     return (ROOT / "bot.py").read_text(encoding="utf-8")
 
 
+def _bot_helper(name):
+    tree = ast.parse(_bot_source())
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    module = ast.Module(body=[function], type_ignores=[])
+    namespace = {"re": re}
+    exec(compile(module, "bot.py", "exec"), namespace)
+    return namespace[name]
+
+
+def test_strip_sticker_marker_at_end():
+    strip_markers = _bot_helper("_strip_sticker_markers")
+    assert strip_markers("That was fun. [sticker sent: excited]") == "That was fun."
+
+
+def test_strip_sticker_marker_mid_text():
+    strip_markers = _bot_helper("_strip_sticker_markers")
+    assert strip_markers("Hello [sticker: excited] there") == "Hello there"
+    assert strip_markers("Hello [sticker: excited], there") == "Hello, there"
+
+
+def test_strip_sticker_marker_spacing_case_and_delimiters():
+    strip_markers = _bot_helper("_strip_sticker_markers")
+    assert strip_markers("A [  StIcKeR   SeNt : excited ] B") == "A B"
+    assert strip_markers("A (sticker sent:excited) B") == "A B"
+    assert strip_markers("A\u3000［Sticker\u3000sent：\u3000excited］\u3000B") == "A B"
+
+
+def test_strip_sticker_marker_leaves_plain_text_unchanged():
+    strip_markers = _bot_helper("_strip_sticker_markers")
+    text = "  Normal  text.\nNo sticker here. "
+    assert strip_markers(text) == text
+
+
+def test_strip_sticker_marker_preserves_persian_text():
+    strip_markers = _bot_helper("_strip_sticker_markers")
+    assert strip_markers("سلام [sticker sent: excited] دنیا") == "سلام دنیا"
+
+
+def test_strip_sticker_marker_only_answer_is_empty():
+    strip_markers = _bot_helper("_strip_sticker_markers")
+    assert strip_markers("[sticker sent: excited]") == ""
+
+
+def test_bot_does_not_store_sticker_marker_in_history():
+    tree = ast.parse(_bot_source())
+    assistant_contents = [
+        node.args[2]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "add_message"
+        and len(node.args) >= 3
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "assistant"
+    ]
+    assert len(assistant_contents) == 1
+    assert isinstance(assistant_contents[0], ast.Name)
+    assert assistant_contents[0].id == "answer"
+
+
 def test_bot_registers_send_sticker_tool():
     tree = ast.parse(_bot_source())
     registered = []
@@ -337,3 +401,4 @@ def test_bot_sticker_guidance_drops_one_in_five_quota():
     end = rest.find("\ndef ", 1)
     section = rest if end < 0 else rest[:end]
     assert "user_requested=true" in section
+    assert "Never write text like [sticker sent: ...] yourself; stickers are sent only by calling the send_sticker tool." in section

@@ -3168,6 +3168,40 @@ async def _safe_reply_text(update: Update, text: str) -> bool:
 # happens here, after the text reply, so a sticker failure can never break or
 # hide Aura's answer — the same principle as reactions.
 
+def _strip_sticker_markers(text: str) -> str:
+    """Remove model-written sticker pseudo-markers without changing other text."""
+    marker = (
+        r"[\[\(［（][\s\u200b\ufeff]*sticker"
+        r"(?:[\s\u200b\ufeff]+sent)?[\s\u200b\ufeff]*[:：]"
+        r"[\s\u200b\ufeff]*[^)\]］）\r\n]*[\]\)］）]"
+    )
+    pattern = re.compile(
+        rf"(?P<before>[\s\u200b\ufeff]*)(?:{marker})"
+        rf"(?:[\s\u200b\ufeff]*{marker})*(?P<after>[\s\u200b\ufeff]*)",
+        re.IGNORECASE,
+    )
+    if not pattern.search(text):
+        return text
+
+    def replace(match: re.Match) -> str:
+        left = text[:match.start()]
+        right = text[match.end():]
+        gap = match.group("before") + match.group("after")
+        if (
+            not left.strip()
+            or not right.strip()
+            or right[0] in ",.!?;:،؛؟)]}»”’"
+        ):
+            return ""
+        if "\n" in gap or "\r" in gap:
+            return "\n"
+        if gap or (left[-1].isalnum() and right[0].isalnum()):
+            return " "
+        return ""
+
+    return pattern.sub(replace, text)
+
+
 def _stickers_prompt_section() -> str:
     """Short English sticker guidance appended to the system prompt when active."""
     lines = [
@@ -3178,6 +3212,7 @@ def _stickers_prompt_section() -> str:
         "- Ordinary neutral messages usually get no sticker.",
         "- Never send a sticker for technical, serious, or sensitive topics.",
         "- At most one sticker per reply; always write a normal text reply too.",
+        "- Never write text like [sticker sent: ...] yourself; stickers are sent only by calling the send_sticker tool.",
         "- Choose the tag by meaning or situation; do not rotate tags artificially.",
         "- If the tool fails or is unavailable, continue with the text reply only and do not mention stickers.",
         "- Available stickers (tag: when to use):",
@@ -3573,16 +3608,30 @@ async def message_handler(
         )
 
         answer = clean_model_answer(answer)
+        answer_without_sticker_markers = _strip_sticker_markers(answer)
+        marker_stripped = answer_without_sticker_markers != answer
+        answer = answer_without_sticker_markers
 
-        # A queued sticker is delivered right after the text reply. The history
-        # marker keeps later turns aware that this reply already had a sticker.
+        # A queued sticker is delivered right after the text reply; keep only
+        # Aura's plain answer in history so later turns don't imitate a marker.
         sticker_tag = _pending_sticker_tag(tool_events) if STICKERS_ENABLED else None
+        successful_sticker_tool = any(
+            isinstance(event, dict)
+            and event.get("tool") == "send_sticker"
+            and isinstance(event.get("result"), dict)
+            and event["result"].get("ok") is True
+            for event in tool_events or []
+        )
+        if marker_stripped and not successful_sticker_tool:
+            logger.warning(
+                "Model wrote a sticker marker without calling send_sticker | chat=%s",
+                history_id,
+            )
+        if not answer:
+            raise GeminiAPIError("Gemini returned an empty response.")
 
         add_message(history_id, "user", saved_user_content)
-        if sticker_tag:
-            add_message(history_id, "assistant", f"{answer} [sticker sent: {sticker_tag}]")
-        else:
-            add_message(history_id, "assistant", answer)
+        add_message(history_id, "assistant", answer)
 
         await send_long_message(update, answer)
 

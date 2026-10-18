@@ -12,6 +12,7 @@ This repository contains the public application code and configuration template.
 - Guarded You.com web search
 - Group-chat triggers and speaker awareness
 - Telegram image handling / vision input
+- Image generation from text and image-to-image editing via Pollinations.ai (optional)
 - Smart sticker sending (model-chosen tags from a personal sticker pack, with cooldowns)
 - Configurable model and search settings
 - Environment-based secrets and configuration
@@ -22,6 +23,7 @@ This repository contains the public application code and configuration template.
 - A Telegram Bot Token
 - A Google AI Studio / Gemini API key
 - Optional: a You.com API key for web search
+- Optional: a Pollinations.ai API key for image generation and editing
 
 ## Installation
 
@@ -68,10 +70,51 @@ GEMINI_MODEL=gemini-3.1-flash-lite
 - `STICKER_COOLDOWN_SECONDS`
 - `STICKER_GROUP_COOLDOWN_SECONDS`
 - `STICKER_TOOL_MAX_CALLS`
+- `POLLINATIONS_API_KEY`
+- `POLLINATIONS_ENABLED`
+- `POLLINATIONS_IMAGE_MODEL`
+- `POLLINATIONS_IMAGE_FALLBACK_MODEL`
+- `POLLINATIONS_EDIT_MODEL`
+- `POLLINATIONS_EDIT_FALLBACK_MODEL`
+- `POLLINATIONS_TIMEOUT`
+- `POLLINATIONS_MAX_PROMPT_CHARS`
+- `POLLINATIONS_IMAGE_WIDTH`
+- `POLLINATIONS_IMAGE_HEIGHT`
+- `POLLINATIONS_TOOL_MAX_CALLS`
+- `POLLINATIONS_UPLOAD_PRIVACY`
 
 ## Stickers
 
 Smart sticker sending maps English tags from `stickers_config.json` (committed, no secrets) onto a Telegram sticker pack fetched with `getStickerSet` at startup. Sticker `file_id`s are cached in `bot.db` (`sticker_cache`) only as a fallback and are never exposed to the model. If the pack cannot be loaded, the feature disables itself and normal text replies continue.
+
+## Images
+
+Image generation is optional and stays completely disabled until
+`POLLINATIONS_API_KEY` is set. Aura then gains a `generate_image` tool, so natural
+requests such as «عکس بساز از یک گربه فضانورد» work without a command. If the
+request is vague («می‌خوام برام یه عکس بسازی»), Aura asks what the image should
+show instead of generating something arbitrary.
+
+You can also use:
+
+```text
+/image یک فضاپیمای قدیمی در مه
+```
+
+To edit an image, send a photo with an edit caption such as «آسمان را بنفش کن»
+or «این را کارتونی کن», or reply to a photo with `/image <change>`. Aura uploads
+the source image to Pollinations media storage, passes the public URL through the
+image-to-image `image=` parameter, and sends the result back. Ambiguous captions
+(«این عکس چیه؟») continue to use Gemini vision unchanged. Pollinations stores
+uploads as unlisted public URLs for up to 30 days; `POLLINATIONS_UPLOAD_PRIVACY`
+(default `true`) strips EXIF/GPS metadata before the file leaves the bot.
+
+The defaults are `flux` for generation and `kontext` for editing, with automatic
+fallbacks to `seedream` and `nanobanana`. All model names, timeouts, dimensions,
+and prompt limits are configurable in `.env`; see `.env.example`.
+
+No additional Python package is required — the client uses `requests`, which is
+already a dependency.
 
 ## Run
 
@@ -109,6 +152,7 @@ Never commit:
 - Telegram bot tokens
 - Gemini API keys
 - You.com API keys
+- Pollinations.ai API keys
 - `bot.db`
 - logs containing API URLs or credentials
 

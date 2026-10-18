@@ -20,6 +20,13 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
 
 from tool_system import AgentRunState, AgentRunner, ToolRegistry
+from image_intent import (
+    extract_image_command_prompt,
+    extract_text_image_request,
+    looks_like_image_edit_request,
+    needs_edit_details,
+)
+from pollinations_image import GeneratedImage, PollinationsError, PollinationsImageClient
 from reaction_manager import reaction_manager
 from sticker_manager import sticker_manager
 from reply_context import (
@@ -154,6 +161,45 @@ sticker_manager.configure(
     group_cooldown_seconds=STICKER_GROUP_COOLDOWN_SECONDS,
 )
 
+# Pollinations image generation/editing (optional). Missing key => the feature
+# stays disabled, the tool is not registered, and Aura never advertises it.
+POLLINATIONS_ENABLED = os.getenv("POLLINATIONS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
+POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip() or "flux"
+POLLINATIONS_EDIT_MODEL = os.getenv("POLLINATIONS_EDIT_MODEL", "kontext").strip() or "kontext"
+POLLINATIONS_IMAGE_FALLBACK_MODEL = os.getenv("POLLINATIONS_IMAGE_FALLBACK_MODEL", "seedream").strip()
+POLLINATIONS_EDIT_FALLBACK_MODEL = os.getenv("POLLINATIONS_EDIT_FALLBACK_MODEL", "nanobanana").strip()
+POLLINATIONS_UPLOAD_PRIVACY = os.getenv("POLLINATIONS_UPLOAD_PRIVACY", "true").strip().lower() in {"1", "true", "yes", "on"}
+try:
+    POLLINATIONS_TIMEOUT = int(os.getenv("POLLINATIONS_TIMEOUT", "180"))
+    POLLINATIONS_MAX_PROMPT_CHARS = int(os.getenv("POLLINATIONS_MAX_PROMPT_CHARS", "1500"))
+    POLLINATIONS_IMAGE_WIDTH = int(os.getenv("POLLINATIONS_IMAGE_WIDTH", "1024"))
+    POLLINATIONS_IMAGE_HEIGHT = int(os.getenv("POLLINATIONS_IMAGE_HEIGHT", "1024"))
+    POLLINATIONS_TOOL_MAX_CALLS = int(os.getenv("POLLINATIONS_TOOL_MAX_CALLS", "1"))
+except ValueError as exc:
+    raise RuntimeError(
+        "POLLINATIONS_TIMEOUT, POLLINATIONS_MAX_PROMPT_CHARS, POLLINATIONS_IMAGE_WIDTH, "
+        "POLLINATIONS_IMAGE_HEIGHT and POLLINATIONS_TOOL_MAX_CALLS must be integers."
+    ) from exc
+if POLLINATIONS_TIMEOUT < 30 or POLLINATIONS_TIMEOUT > 600:
+    raise RuntimeError("POLLINATIONS_TIMEOUT must be between 30 and 600 seconds")
+if POLLINATIONS_MAX_PROMPT_CHARS < 200 or POLLINATIONS_MAX_PROMPT_CHARS > 6000:
+    raise RuntimeError("POLLINATIONS_MAX_PROMPT_CHARS must be between 200 and 6000")
+if not (64 <= POLLINATIONS_IMAGE_WIDTH <= 2048) or not (64 <= POLLINATIONS_IMAGE_HEIGHT <= 2048):
+    raise RuntimeError("POLLINATIONS_IMAGE_WIDTH and POLLINATIONS_IMAGE_HEIGHT must be between 64 and 2048")
+POLLINATIONS_TOOL_MAX_CALLS = max(1, POLLINATIONS_TOOL_MAX_CALLS)
+pollinations_client = PollinationsImageClient(
+    POLLINATIONS_API_KEY if POLLINATIONS_ENABLED else "",
+    image_model=POLLINATIONS_IMAGE_MODEL,
+    edit_model=POLLINATIONS_EDIT_MODEL,
+    image_fallback_model=POLLINATIONS_IMAGE_FALLBACK_MODEL,
+    edit_fallback_model=POLLINATIONS_EDIT_FALLBACK_MODEL,
+    timeout=POLLINATIONS_TIMEOUT,
+    max_prompt_chars=POLLINATIONS_MAX_PROMPT_CHARS,
+    edit_max_side=max(POLLINATIONS_IMAGE_WIDTH, POLLINATIONS_IMAGE_HEIGHT),
+    upload_privacy=POLLINATIONS_UPLOAD_PRIVACY,
+)
+
 MEMORY_STOPWORDS = {"و", "در", "به", "از", "که", "این", "را", "با", "برای", "یک", "است", "شده", "هم", "تا", "یا", "اما", "اگر", "چون", "the", "a", "an", "is", "are", "was", "were", "be", "to", "of", "in", "for", "on", "with", "at", "by", "from", "and", "or", "but", "not", "this", "that", "it", "as"}
 VIDEO_CONTEXT_TTL = 30 * 60
 YOUTUBE_URL_PATTERN = re.compile(
@@ -218,6 +264,18 @@ logging.basicConfig(
 for _noisy in ("httpx", "httpcore"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger("aura-telegram-bot")
+
+if not POLLINATIONS_ENABLED:
+    logger.info("Pollinations image features are disabled (POLLINATIONS_ENABLED=false).")
+elif not POLLINATIONS_API_KEY:
+    logger.warning(
+        "POLLINATIONS_API_KEY is missing; image generation and image editing are disabled."
+    )
+else:
+    logger.info(
+        "Pollinations image features enabled | image_model=%s edit_model=%s",
+        POLLINATIONS_IMAGE_MODEL, POLLINATIONS_EDIT_MODEL,
+    )
 
 SYSTEM_PROMPT = f"""
 You are Aura, an advanced personal AI assistant.
@@ -630,6 +688,11 @@ def build_system_prompt(update: Optional[Update] = None) -> str:
     # fails to load, so the model is never told about an unavailable tool.
     if STICKERS_ENABLED and sticker_manager.is_ready():
         prompt += "\n\n" + _stickers_prompt_section()
+
+    # Image guidance is dynamic too: it appears only when the Pollinations
+    # client is configured, so Aura never advertises a tool she cannot use.
+    if pollinations_client.is_configured:
+        prompt += "\n\n" + _image_generation_prompt_section()
 
     if FOUNDER_USER_ID:
         prompt += f"""\n\nFounder relationship (internal context):
@@ -1680,6 +1743,105 @@ def _tool_send_sticker(args: dict) -> dict:
     return {"ok": True, "tag": tag, "note": "Sticker queued; it will be sent after your text reply."}
 
 
+# ---------- Pollinations image tool ----------
+
+_IMAGE_ASPECT_RATIOS: dict[str, tuple[int, int]] = {
+    "1:1": (1, 1),
+    "16:9": (16, 9),
+    "9:16": (9, 16),
+    "4:3": (4, 3),
+    "3:4": (3, 4),
+}
+
+
+def _aspect_dimensions(aspect_ratio: str) -> tuple[int, int]:
+    """Map a friendly aspect ratio to pixel dimensions around the configured base size."""
+    width_ratio, height_ratio = _IMAGE_ASPECT_RATIOS.get(
+        str(aspect_ratio or "1:1").strip(), _IMAGE_ASPECT_RATIOS["1:1"]
+    )
+    long_side = max(POLLINATIONS_IMAGE_WIDTH, POLLINATIONS_IMAGE_HEIGHT)
+    if width_ratio >= height_ratio:
+        width = long_side
+        height = round(long_side * height_ratio / width_ratio)
+    else:
+        height = long_side
+        width = round(long_side * width_ratio / height_ratio)
+    width = max(64, min(2048, round(width / 8) * 8))
+    height = max(64, min(2048, round(height / 8) * 8))
+    return width, height
+
+
+def _build_generate_image_declaration() -> types.FunctionDeclaration:
+    return types.FunctionDeclaration(
+        name="generate_image",
+        description=(
+            "Create a new image from a detailed text description. The finished image "
+            "is delivered to the user automatically after the text reply. Call this only "
+            "when the user explicitly asks for a new image and has described what should "
+            "be in it. If the request is vague or only asks whether Aura can make images, "
+            "ask what the image should show instead of calling the tool. Write the prompt "
+            "in English, with the subject, setting, style, mood, colors, and composition."
+        ),
+        parameters_json_schema={
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Detailed English text-to-image prompt. Preserve all user-requested details.",
+                },
+                "aspect_ratio": {
+                    "type": "string",
+                    "description": "Requested shape of the image. Defaults to 1:1.",
+                    "enum": list(_IMAGE_ASPECT_RATIOS),
+                },
+            },
+            "required": ["prompt"],
+        },
+    )
+
+
+def _tool_generate_image(args: dict) -> dict:
+    """Generate an image in the agent thread and queue it for Telegram delivery.
+
+    The binary image never goes into Gemini's function response. It is placed in
+    the per-request delivery list injected by AgentRunner; message_handler sends
+    it after the text reply, exactly like a queued sticker.
+    """
+    if not pollinations_client.is_configured:
+        return {"ok": False, "error": "Image generation is currently unavailable."}
+    prompt = str(args.get("prompt") or "").strip()
+    if not prompt:
+        return {"ok": False, "error": "The image prompt is empty."}
+    delivery = args.get("_image_delivery")
+    if not isinstance(delivery, list):
+        logger.error("Image tool has no delivery queue; refusing to generate an undeliverable image")
+        return {"ok": False, "error": "Image delivery is not available in this context."}
+
+    width, height = _aspect_dimensions(str(args.get("aspect_ratio") or "1:1"))
+    try:
+        image = pollinations_client.generate(prompt, width=width, height=height)
+    except PollinationsError as exc:
+        logger.warning(
+            "Image tool failed | status=%s code=%s model=%s | %s",
+            exc.status_code, exc.code or "-", pollinations_client.image_model, exc,
+        )
+        return {"ok": False, "error": exc.user_message}
+    except Exception:
+        logger.exception("Unexpected image tool failure")
+        return {"ok": False, "error": "Image generation failed unexpectedly."}
+
+    delivery.append(image)
+    logger.info(
+        "Image tool generated | model=%s bytes=%s width=%s height=%s",
+        image.model, len(image.data), width, height,
+    )
+    return {
+        "ok": True,
+        "status": "ready",
+        "note": "The image was generated and is being delivered to the user automatically.",
+    }
+
+
 def _create_tool_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(name="web_search", declaration=_build_tool_search_declaration(), handler=_tool_web_search, max_calls_per_run=WEB_SEARCH_TOOL_MAX_CALLS)
@@ -1694,6 +1856,14 @@ def _create_tool_registry() -> ToolRegistry:
     # handler answers "disabled" and the model simply continues with text.
     if STICKERS_ENABLED and sticker_manager.is_configured():
         registry.register(name="send_sticker", declaration=_build_send_sticker_declaration(), handler=_tool_send_sticker, max_calls_per_run=STICKER_TOOL_MAX_CALLS)
+    # Image tools are advertised only when a Pollinations key is configured.
+    if pollinations_client.is_configured:
+        registry.register(
+            name="generate_image",
+            declaration=_build_generate_image_declaration(),
+            handler=_tool_generate_image,
+            max_calls_per_run=POLLINATIONS_TOOL_MAX_CALLS,
+        )
     return registry
 
 
@@ -2448,12 +2618,14 @@ async def typing_loop(
     chat_id: int,
     context: ContextTypes.DEFAULT_TYPE,
     stop_event: asyncio.Event,
+    action: str = ChatAction.TYPING,
 ) -> None:
+    """Keep a chat action alive until ``stop_event`` is set."""
     while not stop_event.is_set():
         try:
             await context.bot.send_chat_action(
                 chat_id=chat_id,
-                action=ChatAction.TYPING,
+                action=action,
             )
         except TelegramError:
             pass
@@ -2489,6 +2661,7 @@ async def start_command(
         f"/memory — نمایش حافظه بلندمدت\n"
         f"/remember <text> — ذخیره در حافظه\n"
         f"/forget <text> — حذف از حافظه\n"
+        f"/image <prompt> — ساخت عکس (یا ادیت عکسی که روی آن ریپلای می‌کنی)\n"
         f"/whoami — نمایش Telegram ID و وضعیت سازنده"
     )
 
@@ -3061,6 +3234,359 @@ async def download_replied_media(
     return raw, mime_type, label
 
 
+# ---------- Pollinations image delivery and direct image paths ----------
+
+_IMAGE_PROMPT_SYSTEM = (
+    "You rewrite requests for an image-generation service. Return only the final "
+    "prompt, with no explanation, quotes, Markdown, or prefixes."
+)
+
+_IMAGE_PROMPT_INSTRUCTIONS = {
+    "generate": (
+        "Turn the user's request into one vivid, specific English text-to-image prompt. "
+        "Preserve the subject, setting, style, mood, colors, composition, aspect ratio, "
+        "and any literal text the user asked for. Do not add unrelated elements."
+    ),
+    "edit": (
+        "Turn the user's image-editing instruction into one concise English prompt for "
+        "an image-editing model. Preserve every requested change, color, style, object, "
+        "and constraint. Do not add unrelated changes."
+    ),
+}
+
+
+def _image_caption(text: str) -> Optional[str]:
+    """Build a short Telegram caption from the user's original wording."""
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value:
+        return None
+    return f"🎨 {value}"[:1000]
+
+
+def _telegram_image_file(image: GeneratedImage) -> io.BytesIO:
+    """Return a fresh named buffer (PTB reads the stream during the API call)."""
+    buffer = io.BytesIO(image.data)
+    buffer.name = image.filename
+    return buffer
+
+
+async def _send_generated_image(
+    update: Update,
+    image: GeneratedImage,
+    caption: Optional[str] = None,
+) -> bool:
+    """Send one generated image; fall back to a document when Telegram rejects a photo."""
+    if not update.message:
+        return False
+    caption = (caption or None)
+    if caption:
+        caption = re.sub(r"\s+", " ", caption).strip()[:1000] or None
+
+    for attempt in range(2):
+        try:
+            if image.telegram_safe_photo:
+                await update.message.reply_photo(
+                    photo=_telegram_image_file(image),
+                    caption=caption,
+                )
+            else:
+                await update.message.reply_document(
+                    document=_telegram_image_file(image),
+                    caption=caption,
+                )
+            return True
+        except RetryAfter as exc:
+            if attempt == 0:
+                await asyncio.sleep(min(float(exc.retry_after), 30))
+                continue
+            logger.warning("Generated image send rate-limited | retry_after=%s", exc.retry_after)
+            return False
+        except BadRequest as exc:
+            logger.warning("Telegram rejected generated photo; trying document | %s", exc)
+            try:
+                await update.message.reply_document(
+                    document=_telegram_image_file(image),
+                    caption=caption,
+                )
+                return True
+            except TelegramError as document_exc:
+                logger.warning("Generated image document fallback failed | %s", document_exc)
+                return False
+        except TelegramError as exc:
+            logger.warning("Generated image send failed | %s", exc)
+            return False
+    return False
+
+
+async def _deliver_generated_images(update: Update, images: list[GeneratedImage]) -> None:
+    """Deliver images queued by the generate_image tool after the text reply."""
+    for image in images:
+        sent = await _send_generated_image(update, image)
+        logger.info(
+            "Tool image delivery | chat=%s bytes=%s mime=%s sent=%s",
+            update.effective_chat.id if update.effective_chat else None,
+            len(image.data), image.mime_type, sent,
+        )
+
+
+def _prepare_pollinations_prompt(model: str, text: str, *, mode: str) -> str:
+    """Best-effort English rewrite/translation; never blocks the local fallback."""
+    original = str(text or "").strip()
+    if not original:
+        return original
+    # English prompts already work well with the image models; skip a needless
+    # Gemini round-trip and send the user's exact wording.
+    if all(ord(char) < 128 for char in original):
+        return original[:POLLINATIONS_MAX_PROMPT_CHARS]
+    instruction = _IMAGE_PROMPT_INSTRUCTIONS.get(mode, _IMAGE_PROMPT_INSTRUCTIONS["generate"])
+    try:
+        response = call_with_retry(
+            lambda: GEMINI_CLIENT.models.generate_content(
+                model=model,
+                contents=original,
+                config=types.GenerateContentConfig(
+                    system_instruction=_IMAGE_PROMPT_SYSTEM + "\n\n" + instruction,
+                    temperature=0.4,
+                    max_output_tokens=400,
+                ),
+            ),
+            operation_name="image-prompt-rewrite",
+            logger=logger,
+            max_retries=1,
+        )
+        rewritten = (getattr(response, "text", None) or "").strip()
+        rewritten = re.sub(r"^```(?:[a-zA-Z]+)?\s*|\s*```$", "", rewritten).strip()
+        rewritten = re.sub(r"^(?:image\s*prompt|prompt)\s*:\s*", "", rewritten, flags=re.IGNORECASE)
+        rewritten = rewritten.strip().strip('"').strip("'").strip()
+        if rewritten:
+            return rewritten[:POLLINATIONS_MAX_PROMPT_CHARS]
+    except Exception as exc:
+        logger.warning(
+            "Image prompt rewrite failed; using original text | type=%s",
+            type(exc).__name__,
+        )
+    return original[:POLLINATIONS_MAX_PROMPT_CHARS]
+
+
+async def _run_image_generation(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    prompt: str,
+) -> None:
+    """Generate and send an image for the /image command."""
+    if not update.message or not update.effective_chat:
+        return
+    history_id = conversation_key(update)
+    model = get_user_model(history_id)
+
+    stop_action = asyncio.Event()
+    action_task = asyncio.create_task(
+        typing_loop(update.effective_chat.id, context, stop_action, action=ChatAction.UPLOAD_PHOTO)
+    )
+    try:
+        english_prompt = await asyncio.to_thread(
+            _prepare_pollinations_prompt, model, prompt, mode="generate"
+        )
+        image = await asyncio.to_thread(
+            pollinations_client.generate,
+            english_prompt,
+            width=POLLINATIONS_IMAGE_WIDTH,
+            height=POLLINATIONS_IMAGE_HEIGHT,
+        )
+    except PollinationsError as exc:
+        logger.warning(
+            "Image generation failed | status=%s code=%s model=%s | %s",
+            exc.status_code, exc.code or "-", pollinations_client.image_model, exc,
+        )
+        await _safe_reply_text(update, exc.user_message)
+        return
+    except Exception:
+        logger.exception("Unexpected image generation failure")
+        await _safe_reply_text(update, generic_user_error().message)
+        return
+    finally:
+        stop_action.set()
+        try:
+            await action_task
+        except asyncio.CancelledError:
+            pass
+
+    sent = await _send_generated_image(update, image, caption=_image_caption(prompt))
+    if sent:
+        add_message(history_id, role="user", content=make_user_message(update, f"/image {prompt}"))
+        add_message(history_id, role="assistant", content=f"[Generated image sent: {prompt}]")
+        logger.info(
+            "Image generated | chat=%s model=%s bytes=%s",
+            history_id, image.model, len(image.data),
+        )
+    else:
+        await _safe_reply_text(update, "❌ عکس ساخته شد ولی تلگرام نتوانست آن را ارسال کند.")
+
+
+def _reply_contains_editable_image(reply_message) -> bool:
+    if reply_message is None:
+        return False
+    if getattr(reply_message, "photo", None):
+        return True
+    document = getattr(reply_message, "document", None)
+    if document is None:
+        return False
+    mime = str(getattr(document, "mime_type", "") or "")
+    return mime.startswith("image/")
+
+
+async def _run_image_edit(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    prompt: str,
+    *,
+    source_message=None,
+    history_text: Optional[str] = None,
+) -> None:
+    """Edit the current photo or a replied-to photo and send the result."""
+    if not update.message or not update.effective_chat:
+        return
+    if needs_edit_details(prompt):
+        await update.message.reply_text(
+            "چه تغییری روی عکس اعمال کنم؟ مثلاً «آسمان را بنفش کن» یا «این را کارتونی کن»."
+        )
+        return
+    history_id = conversation_key(update)
+    model = get_user_model(history_id)
+
+    stop_action = asyncio.Event()
+    action_task = asyncio.create_task(
+        typing_loop(update.effective_chat.id, context, stop_action, action=ChatAction.UPLOAD_PHOTO)
+    )
+    try:
+        if source_message is None:
+            image_bytes, mime_type, _ = await download_telegram_photo(update, context)
+        else:
+            image_bytes, mime_type, _ = await download_replied_media(source_message, context)
+            if not str(mime_type or "").startswith("image/"):
+                await _safe_reply_text(update, "برای ادیت، باید روی یک عکس ریپلای کنی یا خود عکس را بفرستی.")
+                return
+        english_prompt = await asyncio.to_thread(
+            _prepare_pollinations_prompt, model, prompt, mode="edit"
+        )
+        # Let the client preserve the source photo's aspect ratio. Only the
+        # long side is clamped to POLLINATIONS_IMAGE_WIDTH/HEIGHT.
+        image = await asyncio.to_thread(
+            pollinations_client.edit,
+            english_prompt,
+            image_bytes,
+            mime_type,
+        )
+    except GeminiAPIError as exc:
+        await _safe_reply_text(update, str(exc))
+        return
+    except PollinationsError as exc:
+        logger.warning(
+            "Image edit failed | status=%s code=%s model=%s | %s",
+            exc.status_code, exc.code or "-", pollinations_client.edit_model, exc,
+        )
+        await _safe_reply_text(update, exc.user_message)
+        return
+    except Exception:
+        logger.exception("Unexpected image edit failure")
+        await _safe_reply_text(update, generic_user_error().message)
+        return
+    finally:
+        stop_action.set()
+        try:
+            await action_task
+        except asyncio.CancelledError:
+            pass
+
+    sent = await _send_generated_image(update, image, caption=_image_caption(prompt))
+    if sent:
+        add_message(
+            history_id,
+            role="user",
+            content=make_user_message(update, history_text or prompt),
+        )
+        add_message(
+            history_id,
+            role="assistant",
+            content=f"[Edited image sent. Instruction: {prompt}]",
+        )
+        logger.info(
+            "Image edited | chat=%s model=%s bytes=%s",
+            history_id, image.model, len(image.data),
+        )
+    else:
+        await _safe_reply_text(update, "❌ عکس ادیت شد ولی تلگرام نتوانست آن را ارسال کند.")
+
+
+async def _maybe_handle_current_photo_edit(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+) -> bool:
+    """Intercept a photo whose caption is an explicit edit request or /image command."""
+    if not update.message or not update.message.photo:
+        return False
+    caption = (text or "").strip()
+    command_prompt = extract_image_command_prompt(caption)
+    if command_prompt is not None:
+        if not command_prompt:
+            await update.message.reply_text(
+                "بگو چه تغییری روی عکس اعمال کنم؛ مثلاً: «آسمان را بنفش کن»."
+            )
+            return True
+        await _run_image_edit(
+            update,
+            context,
+            command_prompt,
+            history_text=update.message.caption or caption,
+        )
+        return True
+    if looks_like_image_edit_request(caption):
+        await _run_image_edit(update, context, caption)
+        return True
+    return False
+
+
+async def image_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """/image <prompt>: generate an image, or edit a replied-to photo."""
+    if not update.message:
+        return
+    if not pollinations_client.is_configured:
+        await update.message.reply_text(
+            "قابلیت ساخت عکس فعلاً روی Aura فعال نیست. اگر کلید سرویس تصویر تنظیم شود، از همین دستور می‌توانی استفاده کنی."
+        )
+        return
+
+    prompt = " ".join(context.args or []).strip()
+    reply = update.message.reply_to_message
+    editable_reply = reply if _reply_contains_editable_image(reply) else None
+
+    if not prompt:
+        if editable_reply is not None:
+            await update.message.reply_text(
+                "چه تغییری روی این عکس اعمال کنم؟\n"
+                "مثال: <code>/image آسمان را بنفش کن</code>",
+                parse_mode="HTML",
+            )
+        else:
+            await update.message.reply_text(
+                "فرمت درست:\n"
+                "<code>/image &lt;توضیح عکس&gt;</code>\n\n"
+                "مثال: <code>/image یک گربه فضانورد در حال نقاشی</code>\n"
+                "برای ادیت، روی یک عکس ریپلای کن و همین دستور را با توضیح تغییر بفرست.",
+                parse_mode="HTML",
+            )
+        return
+
+    if editable_reply is not None:
+        await _run_image_edit(update, context, prompt, source_message=editable_reply)
+    else:
+        await _run_image_generation(update, context, prompt)
+
+
 BARE_CALL_RESPONSES = (
     "بله؟",
     "جان؟",
@@ -3219,6 +3745,22 @@ def _stickers_prompt_section() -> str:
     ]
     lines.extend(f"  - {line}" for line in sticker_manager.describe_for_prompt().splitlines())
     return "\n".join(lines)
+
+
+def _image_generation_prompt_section() -> str:
+    """Image-tool guidance appended only while the Pollinations client is ready."""
+    return "\n".join([
+        "Image generation:",
+        "- Aura has a real image-generation tool named generate_image. It creates a new image from a written prompt, and the finished image is delivered to the user automatically.",
+        "- When the user explicitly asks Aura to create, generate, draw, or make an image and has described what should be in it, call generate_image in the same turn. Do not merely describe what the image could look like.",
+        "- If the user only asks whether Aura can make images, or says they want an image without saying what it should show, do not call the tool. Answer naturally and ask what they want to see.",
+        "- Write the tool prompt in English. Be vivid, specific, and faithful to the user's request: subject, action, setting, style, mood, colors, lighting, composition, and any aspect ratio they asked for.",
+        "- Call generate_image at most once per user request unless the user explicitly asks for another variation.",
+        "- After the tool returns ok=true, acknowledge it briefly and naturally in Persian. The image is sent automatically after your text; never invent an image URL and never claim you can see the generated result.",
+        "- If the tool returns ok=false, apologize briefly in natural Persian using the provided error, and offer to try again. Do not expose HTTP status codes, endpoints, model IDs, API keys, or other implementation details.",
+        "- Never imply that an image was created unless the tool result says it succeeded.",
+        "- Aura can also edit a photo the user sends with an edit caption. If the user asks to edit an image but has not attached one, ask them to send the photo.",
+    ])
 
 
 def _resolved_sticker_set_name() -> str:
@@ -3424,6 +3966,31 @@ async def message_handler(
     if not text and not image_requested and not document_requested:
         return
 
+    # `/image` in a photo caption never reaches CommandHandler (Telegram commands
+    # are text-only), so answer it here even when the feature is disabled.
+    if image_requested and extract_image_command_prompt(text) is not None and not pollinations_client.is_configured:
+        await update.message.reply_text(
+            "قابلیت ساخت عکس فعلاً روی Aura فعال نیست."
+        )
+        return
+
+    # Explicit image edits are local, deterministic paths: they must run before
+    # reactions and before the normal Gemini vision pipeline. Ambiguous photo
+    # captions («این عکس چیه؟») still go to Gemini vision unchanged.
+    if pollinations_client.is_configured:
+        if image_requested and await _maybe_handle_current_photo_edit(update, context, text):
+            return
+        replied_to = update.message.reply_to_message
+        if (
+            not image_requested
+            and not document_requested
+            and text
+            and _reply_contains_editable_image(replied_to)
+            and looks_like_image_edit_request(text)
+        ):
+            await _run_image_edit(update, context, text, source_message=replied_to)
+            return
+
     # High-confidence social reactions are handled locally before Gemini.
     # This keeps simple interactions instant and prevents needless model calls.
     reaction_decision = None
@@ -3588,8 +4155,31 @@ async def message_handler(
             # build_request_with_reply_context() already appended the current user
             # message. Do not append it again: that would send the same message twice.
 
-        # Private runtime context for the send_sticker tool. Like file paths,
-        # these values never appear in Gemini's tool schema.
+        # An explicit «عکس بساز از ...» request gets a one-turn instruction so
+        # the model reliably calls generate_image instead of only describing the
+        # image. This is a hint, not a local generator: Gemini still owns the
+        # prompt wording and the tool runtime owns execution.
+        if (
+            pollinations_client.is_configured
+            and not image_requested
+            and not document_requested
+            and not reply_has_media
+            and text
+            and extract_text_image_request(text)
+        ):
+            request_messages = list(request_messages) + [{
+                "role": "system",
+                "content": (
+                    "The current user message is an explicit request to create a new image. "
+                    "Call generate_image in this turn with a detailed English prompt that "
+                    "preserves the requested subject and details. Do not merely promise, "
+                    "describe, or explain how to create the image."
+                ),
+            }]
+
+        # Private runtime context for tools. Like file paths, these values never
+        # appear in Gemini's tool schema: AgentRunner injects them as _-prefixed
+        # handler arguments only.
         sticker_context: dict = {}
         if STICKERS_ENABLED and sticker_manager.is_configured():
             sticker_context = {
@@ -3597,6 +4187,9 @@ async def message_handler(
                 "user_id": update.effective_user.id,
                 "is_group": is_group(update),
             }
+        image_delivery: list[GeneratedImage] = []
+        if pollinations_client.is_configured:
+            sticker_context["image_delivery"] = image_delivery
 
         answer, usage, tool_events = await asyncio.to_thread(
             ask_gemini,
@@ -3639,6 +4232,11 @@ async def message_handler(
             # Inline (not a background task): the reservation already happened,
             # and a sticker failure here is logged and swallowed, never raised.
             await _send_queued_sticker(update, sticker_tag, context)
+
+        if image_delivery:
+            # The tool handler generated the image in the worker thread; delivery
+            # happens here so a Telegram failure cannot break Aura's text reply.
+            await _deliver_generated_images(update, image_delivery)
 
         # Optional semantic reaction runs after the reply, so it never adds
         # latency to Aura's normal response. High-confidence reactions were
@@ -3795,6 +4393,9 @@ def build_application() -> Application:
     )
     application.add_handler(
         CommandHandler("settings", settings_command)
+    )
+    application.add_handler(
+        CommandHandler("image", image_command)
     )
     application.add_handler(
         MessageHandler(

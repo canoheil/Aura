@@ -14,6 +14,8 @@ This repository contains the public application code and configuration template.
 - Telegram image handling / vision input
 - Image generation from text and image-to-image editing via Pollinations.ai (optional)
 - Quota-free vector image creation: Aura writes SVG herself and it is rendered locally to PNG
+- Current conditions and 3-day forecast for any city via Open-Meteo (keyless)
+- Real Reddit memes fetched with a keyless API, then commented on from the actual picture
 - Smart sticker sending (model-chosen tags from a personal sticker pack, with cooldowns)
 - Configurable model and search settings
 - Environment-based secrets and configuration
@@ -89,6 +91,20 @@ GEMINI_MODEL=gemini-3.1-flash-lite
 - `SVG_IMAGE_MAX_SIDE`
 - `SVG_IMAGE_MAX_OUTPUT_BYTES`
 - `SVG_IMAGE_BACKGROUND`
+- `WEATHER_ENABLED`
+- `WEATHER_GEOCODE_URL`
+- `WEATHER_FORECAST_URL`
+- `WEATHER_TIMEOUT`
+- `WEATHER_CACHE_TTL`
+- `WEATHER_TOOL_MAX_CALLS`
+- `MEMES_ENABLED`
+- `MEME_API_BASE_URL`
+- `MEME_API_FALLBACK_URL`
+- `MEME_API_TIMEOUT`
+- `MEME_MAX_BYTES`
+- `MEME_ALLOW_NSFW`
+- `MEME_ALLOWED_SUBREDDITS`
+- `MEME_TOOL_MAX_CALLS`
 
 ## Stickers
 
@@ -159,6 +175,34 @@ Rendering rules enforced by `svg_image.py`:
 If `resvg-py` is missing, the tool is not registered, Aura never mentions the
 capability, and everything else keeps working. Set `SVG_IMAGE_ENABLED=false` to
 turn it off explicitly.
+
+## Weather and memes
+
+Both features are keyless, need no extra dependencies, and run fine on shared
+hosting: they are plain HTTPS calls with `requests`.
+
+`weather_api.py` registers a `get_weather` tool. Aura passes the city exactly as
+the user wrote it (Persian or English); the module resolves it with the
+Open-Meteo geocoding API, fetches current conditions plus a 3-day forecast, maps
+WMO weather codes to Persian descriptions, and caches a city for
+`WEATHER_CACHE_TTL` seconds so repeated questions cannot hammer the free
+service. Only a compact summary reaches the model — never the raw payload. A
+local hint recognises explicit questions («هوای تهران چطوره؟»,
+«آب و هوا مشهد»، "weather in Berlin") and makes sure the tool is actually called,
+while talk-about sentences ("درباره هواشناسی چیکار کنم", "چند درجه سرد شده") and
+image/meme requests stay out of it.
+
+`meme_api.py` registers `fetch_meme`, which picks a real Reddit post from
+meme-api.com (with a mirror fallback), downloads the image bytes with a hard
+size cap, refuses NSFW/spoiler posts and non-images, skips memes already sent
+recently, and maps topic words to sensible subreddits
+("پرنده" → `birdmemes`). The fetched bytes are delivered after the text reply and
+shown to Gemini in the same agent turn, so Aura comments on the actual picture.
+Set `MEME_ALLOW_NSFW=true` to accept NSFW-tagged posts (spoilers stay blocked
+either way), and `MEME_ALLOWED_SUBREDDITS` to pin a whitelist.
+
+Set `WEATHER_ENABLED=false` or `MEMES_ENABLED=false` to drop the tools and their
+prompt guidance entirely; nothing else changes.
 
 ## Run
 

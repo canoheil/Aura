@@ -22,6 +22,9 @@ class ToolDefinition:
     declaration: types.FunctionDeclaration
     handler: Callable[[dict], Any]
     max_calls_per_run: int = 3
+    # Non-deterministic tools (a random meme, a live price) must run again even
+    # when the model repeats the exact same call; caching would replay stale data.
+    cache_results: bool = True
 
 
 @dataclass
@@ -45,12 +48,15 @@ class ToolRegistry:
         handler: Callable[[dict], Any],
         *,
         max_calls_per_run: int = 3,
+        cache_results: bool = True,
     ) -> None:
         if not name or name in self._tools:
             raise ValueError(f"Invalid or duplicate tool name: {name!r}")
         if max_calls_per_run < 1:
             raise ValueError("max_calls_per_run must be at least 1")
-        self._tools[name] = ToolDefinition(name, declaration, handler, max_calls_per_run)
+        self._tools[name] = ToolDefinition(
+            name, declaration, handler, max_calls_per_run, bool(cache_results)
+        )
 
     def declarations(self) -> list[types.FunctionDeclaration]:
         return [tool.declaration for tool in self._tools.values()]
@@ -114,7 +120,7 @@ class AgentRunner:
             return result
 
         signature = self._signature(name, args)
-        if signature in state.result_cache:
+        if tool.cache_results and signature in state.result_cache:
             result = state.result_cache[signature]
             logger.info("Agent duplicate tool call avoided | name=%s", name)
             state.events.append({"tool": name, "result": result, "cached": True})
@@ -142,6 +148,7 @@ class AgentRunner:
             logger.exception("Agent tool execution failed | name=%s", name)
             result = {"ok": False, "error": str(exc)[:500]}
 
-        state.result_cache[signature] = result
+        if tool.cache_results:
+            state.result_cache[signature] = result
         state.events.append({"tool": name, "result": result})
         return result

@@ -237,6 +237,10 @@ size cap, refuses NSFW/spoiler posts and non-images, skips memes already sent
 recently, and maps topic words to sensible subreddits
 ("پرنده" → `birdmemes`). The fetched bytes are delivered after the text reply and
 shown to Gemini in the same agent turn, so Aura comments on the actual picture.
+The tool and its guidance are only advertised on turns that are actually about
+memes (a request, a question about one, or a short «یکی دیگه» follow-up), so an
+ordinary chat message never carries the extra tool declaration, the extra model
+round trip, or a Reddit download.
 Set `MEME_ALLOW_NSFW=true` to accept NSFW-tagged posts (spoilers stay blocked
 either way), and `MEME_ALLOWED_SUBREDDITS` to pin a whitelist.
 

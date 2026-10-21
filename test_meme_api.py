@@ -126,6 +126,42 @@ def test_looks_like_meme_request_rejects_talk_about():
     assert meme_api.looks_like_meme_request("میم ها خیلی بامزه اند") is False
 
 
+def test_could_involve_a_meme_is_off_for_ordinary_chat():
+    # The advertisement switch must never fire on messages that are not about
+    # memes: that is what kept fetch_meme in every request.
+    for text in (
+        "سلام، چطوری؟",
+        "خوبی؟",
+        "امروز حالت چطوره",
+        "بریم سینما",
+        "این چیه؟",
+        "بگو ببینم",
+        "داشتم میمون می‌دیدم",
+        "میمیرم از خستگی",
+        "Give me a joke",
+        "show me how to code python",
+        "What's the weather like?",
+        "",
+    ):
+        assert meme_api.could_involve_a_meme(text) is False, text
+
+
+def test_could_involve_a_meme_is_on_for_meme_turns():
+    for text in (
+        "یه میم بده",
+        "میم بده",
+        "یه میم پرنده بده",
+        "send me a meme about cats",
+        "میم ها خیلی بامزه اند",
+        "این میم رو تحلیل کن",
+        "یکی دیگه",
+        "باز یکی دیگه",
+        "another one",
+        "one more please",
+    ):
+        assert meme_api.could_involve_a_meme(text) is True, text
+
+
 def test_extract_meme_topic():
     assert meme_api.extract_meme_topic("یه میم پرنده بده") == "پرنده"
     assert meme_api.extract_meme_topic("send me a meme about cats") == "cats"
@@ -301,6 +337,30 @@ def test_bot_meme_prompt_section():
     source = (ROOT / "bot.py").read_text(encoding="utf-8")
     assert "def _memes_prompt_section" in source
     assert "fetch a real meme" in source.lower()
+
+
+def test_bot_advertises_the_meme_tool_only_on_meme_turns():
+    source = (ROOT / "bot.py").read_text(encoding="utf-8")
+    assert "could_involve_a_meme" in source
+    # ask_gemini forwards the per-turn switch into the config builder.
+    assert "allow_meme_tool=allow_meme_tool" in source
+    assert "allow_meme_tool=meme_turn" in source
+    # the declaration is filtered out, and a hallucinated call is refused.
+    assert 'item.name != "fetch_meme"' in source
+    assert 'args.get("_meme_allowed") is False' in source
+    assert 'runtime_context["meme_allowed"]' in source
+
+
+def test_bot_does_not_paint_the_meme_section_into_every_prompt():
+    source = (ROOT / "bot.py").read_text(encoding="utf-8")
+    build = source.split("def build_system_prompt")[1].split("def is_founder")[0]
+    # The standing system prompt must not describe the meme tool: only a turn
+    # that can use it may mention it.
+    assert "_memes_prompt_section()" not in build
+    # ... and the section is injected per turn instead.
+    handler = source.split("async def message_handler")[1]
+    assert "could_involve_a_meme(text)" in handler
+    assert "_memes_prompt_section()" in handler
 
 
 def test_bot_meme_env_validation():

@@ -31,6 +31,7 @@ from meme_api import (
     Meme,
     MemeClient,
     MemeError,
+    could_involve_a_meme,
     extract_meme_topic,
     looks_like_meme_request,
 )
@@ -845,10 +846,12 @@ def build_system_prompt(update: Optional[Update] = None) -> str:
     if weather_client.is_enabled:
         prompt += "\n\n" + _weather_prompt_section()
 
-    # Meme guidance is dynamic as well: it appears only when the keyless meme
-    # service is configured, so Aura never advertises a tool she cannot use.
-    if meme_client.is_enabled:
-        prompt += "\n\n" + _memes_prompt_section()
+    # Meme guidance is deliberately NOT part of the standing prompt. fetch_meme
+    # takes no required arguments, so while it was advertised on every turn the
+    # model treated "fetch a meme" as a normal step after an ordinary reply:
+    # every such reply then cost an extra Gemini round, a blocking Reddit fetch
+    # and a second vision round. The guidance now rides with the meme turns only
+    # (see message_handler), together with the tool declaration itself.
 
     if FOUNDER_USER_ID:
         prompt += f"""\n\nFounder relationship (internal context):
@@ -2104,9 +2107,10 @@ def _tool_create_svg_image(args: dict) -> dict:
 # That is what lets Aura react to the actual meme instead of inventing one.
 
 _MEME_TOOL_DESCRIPTION = (
-    "Fetch one real, randomly chosen meme from Reddit and send it to the user "
-    "automatically after the text reply. Call this when the user explicitly asks for a "
-    "meme («یه میم بده»، «میم پرنده بفرست»، «یه میم بامزه بده», 'send a meme about cats'). "
+    "Fetch one real, randomly chosen meme from Reddit and send it to the user. "
+    "This tool is offered only when the current message is about memes. Call it when the "
+    "user explicitly asks for a meme («یه میم بده»، «میم پرنده بفرست»، «یه میم بامزه بده», "
+    "'send a meme about cats') or asks for another one after a meme was already sent. "
     "Pass a short topic taken from the user's own words so the right kind of meme is "
     "picked (for example 'birds', 'cats', 'programming', 'wholesome', or the Persian "
     "equivalent). The fetched picture is shown to you inside the same task, so you can "
@@ -2147,6 +2151,11 @@ def _tool_fetch_meme(args: dict) -> dict:
     """Fetch a meme in the agent thread, queue it, and expose the image to vision."""
     if not meme_client.is_enabled:
         return {"ok": False, "error": "Meme fetching is currently unavailable."}
+    if args.get("_meme_allowed") is False:
+        # Defence in depth: the declaration is not even sent on ordinary turns,
+        # but a hallucinated call must never start a Reddit fetch there either.
+        logger.warning("Meme tool refused outside a meme turn")
+        return {"ok": False, "error": "Memes are not available for this message."}
     delivery = args.get("_image_delivery")
     if not isinstance(delivery, list):
         logger.error("Meme tool has no delivery queue; refusing to fetch an undeliverable meme")
@@ -2342,7 +2351,10 @@ def _pop_tool_vision_payload(result: object) -> tuple[Optional[tuple[bytes, str]
 
 
 def _agent_generation_config(
-    system_instruction: str, *, require_web_search: bool = False
+    system_instruction: str,
+    *,
+    require_web_search: bool = False,
+    allow_meme_tool: bool = True,
 ) -> types.GenerateContentConfig:
     """Build one agent-round config, optionally with a mandatory web search.
 
@@ -2350,8 +2362,15 @@ def _agent_generation_config(
     model from answering a time-sensitive question out of memory: a prompt
     instruction is a request, this is a contract. The tool schema itself is
     unchanged, so nothing about the tool's behaviour or arguments differs.
+
+    ``allow_meme_tool=False`` removes ``fetch_meme`` from the declarations. A
+    tool the model cannot see cannot be called, which is what keeps an ordinary
+    chat turn at exactly one model round trip.
     """
-    tool = types.Tool(function_declarations=TOOL_REGISTRY.declarations())
+    declarations = TOOL_REGISTRY.declarations()
+    if not allow_meme_tool:
+        declarations = [item for item in declarations if item.name != "fetch_meme"]
+    tool = types.Tool(function_declarations=declarations)
     config_kwargs: dict = {
         "tools": [tool],
         "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
@@ -2375,6 +2394,7 @@ def ask_gemini(
     file_context: Optional[dict] = None,
     extra_context: Optional[dict] = None,
     require_web_search: bool = False,
+    allow_meme_tool: bool = True,
 ) -> tuple[str, Optional[dict], list[dict]]:
     """Run one bounded Aura agent task using Gemini function calling.
 
@@ -2385,13 +2405,22 @@ def ask_gemini(
     generated with Gemini's tool mode forced to web_search, so a question that is
     only correct when it is current cannot be answered from training data. Later
     rounds stay free to answer or search again.
+
+    ``allow_meme_tool`` is set per turn by the meme intent switch. When it is
+    false the fetch_meme declaration is not sent at all and the runner refuses a
+    hallucinated call to it, so ordinary chat pays nothing for the feature.
     """
     trace = RequestTrace.start()
     system_instruction, contents = _gemini_contents_from_messages(messages)
     require_search = bool(require_web_search and "web_search" in TOOL_REGISTRY.names())
-    config = _agent_generation_config(system_instruction, require_web_search=require_search)
+    config = _agent_generation_config(
+        system_instruction,
+        require_web_search=require_search,
+        allow_meme_tool=allow_meme_tool,
+    )
 
     runtime_context = {"owner_user_id": owner_user_id} if owner_user_id else {}
+    runtime_context["meme_allowed"] = bool(allow_meme_tool)
     if file_context:
         runtime_context.update(file_context)
     if extra_context:
@@ -2410,7 +2439,11 @@ def ask_gemini(
         if round_number and forced_search_round:
             # Only the first round is forced; afterwards the model must be free to
             # answer from the evidence it already has instead of searching again.
-            config = _agent_generation_config(system_instruction, require_web_search=False)
+            config = _agent_generation_config(
+                system_instruction,
+                require_web_search=False,
+                allow_meme_tool=allow_meme_tool,
+            )
             forced_search_round = False
         try:
             response = call_with_retry(
@@ -2435,7 +2468,11 @@ def ask_gemini(
                 exc.__class__.__name__,
             )
             forced_search_round = False
-            config = _agent_generation_config(system_instruction, require_web_search=False)
+            config = _agent_generation_config(
+                system_instruction,
+                require_web_search=False,
+                allow_meme_tool=allow_meme_tool,
+            )
             try:
                 response = call_with_retry(
                     lambda: GEMINI_CLIENT.models.generate_content(
@@ -4943,15 +4980,28 @@ async def message_handler(
                 )
             request_messages = list(request_messages) + [{"role": "system", "content": weather_hint}]
 
-        # The same nudge for memes: a clear «یه میم بده» must actually fetch one
-        # instead of a promise. The topic stays the model's choice; the local
-        # hint only carries the user's wording so the right subreddit is picked.
-        if (
+        # Meme turns advertise themselves. fetch_meme has no required arguments,
+        # so an always-visible declaration invited the model to "finish" ordinary
+        # replies with a meme: one extra model round, a blocking Reddit download
+        # and a second vision round per message. Both the declaration and this
+        # guidance are therefore limited to messages that are actually about
+        # memes (or a short «یکی دیگه» follow-up).
+        meme_turn = bool(
             meme_client.is_enabled
             and not dedicated_tool_turn
             and text
-            and looks_like_meme_request(text)
-        ):
+            and could_involve_a_meme(text)
+        )
+        if meme_turn:
+            request_messages = list(request_messages) + [{
+                "role": "system",
+                "content": _memes_prompt_section(),
+            }]
+
+        # The same nudge for memes: a clear «یه میم بده» must actually fetch one
+        # instead of a promise. The topic stays the model's choice; the local
+        # hint only carries the user's wording so the right subreddit is picked.
+        if meme_turn and looks_like_meme_request(text):
             dedicated_tool_turn = True
             meme_topic = extract_meme_topic(text)
             request_messages = list(request_messages) + [{
@@ -5024,6 +5074,7 @@ async def message_handler(
             file_context=file_context,
             extra_context=sticker_context or None,
             require_web_search=require_web_search,
+            allow_meme_tool=meme_turn,
         )
 
         answer = clean_model_answer(answer)

@@ -188,6 +188,14 @@ _LEADING_MEME = re.compile(
     rf"^(?:(?:یه|یک|دو|سه|چند)\s+)?(?:میم|میمس|memes?)(?![A-Za-z{_FA_AR_LETTERS}])",
     flags=re.IGNORECASE,
 )
+# Short follow-ups after a meme was already sent («یکی دیگه»). They contain no
+# meme keyword at all, so the advertisement switch has to name them explicitly.
+_MEME_FOLLOWUP = re.compile(
+    r"(?:یکی دیگه|یه دیگه|یکی دیگر|باز یکی|باز هم یکی|دوباره یکی|"
+    r"another one|one more|next one|more memes?)",
+    flags=re.IGNORECASE,
+)
+_FOLLOWUP_STRIP = " \t!?.,;:؛،؟…()[]{}«»\"'"
 
 _TOPIC_FILLERS = {
     "لطفا", "لطفاً", "برام", "برای", "من", "واسه", "واسم", "به", "از", "درباره",
@@ -249,6 +257,27 @@ def looks_like_meme_request(text: str) -> bool:
     if _REQUEST_VERB.search(lowered):
         return True
     return False
+
+
+def could_involve_a_meme(text: str) -> bool:
+    """Decide whether the fetch_meme tool should be offered for this message.
+
+    This is the *advertisement* switch, not the request classifier. A tool that
+    is declared on every turn can be called on any turn, so ordinary chat must
+    never carry it. It therefore returns True only when the message actually
+    mentions memes (a request, a question about one, or a joke about them) or is
+    a short "another one" follow-up. Everything else - greetings, questions,
+    work talk - stays completely free of the tool.
+    """
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    if _MEME_WORD.search(normalized.lower()):
+        return True
+    # A follow-up is a short phrase ("باز یکی دیگه", "another one please"); a long
+    # sentence that merely contains one of those words is not a meme turn.
+    stripped = normalized.strip(_FOLLOWUP_STRIP)
+    return len(stripped) <= 40 and bool(_MEME_FOLLOWUP.search(stripped))
 
 
 def extract_meme_topic(text: str) -> Optional[str]:

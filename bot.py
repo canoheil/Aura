@@ -27,6 +27,8 @@ from image_intent import (
     needs_edit_details,
 )
 from pollinations_image import GeneratedImage, PollinationsError, PollinationsImageClient
+import svg_image
+from svg_image import SvgError, render_svg_image
 from reaction_manager import reaction_manager
 from sticker_manager import sticker_manager
 from reply_context import (
@@ -200,6 +202,32 @@ pollinations_client = PollinationsImageClient(
     upload_privacy=POLLINATIONS_UPLOAD_PRIVACY,
 )
 
+# Vector image authoring (optional runtime dependency). Gemini writes SVG markup
+# and Aura renders it locally to PNG, so this path never uses an external
+# service or an image-generation quota. Without resvg-py the feature disables
+# itself and Aura never advertises it.
+SVG_IMAGE_ENABLED = os.getenv("SVG_IMAGE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+try:
+    SVG_IMAGE_TOOL_MAX_CALLS = int(os.getenv("SVG_IMAGE_TOOL_MAX_CALLS", "2"))
+    SVG_IMAGE_MAX_SIDE = int(os.getenv("SVG_IMAGE_MAX_SIDE", "1536"))
+    SVG_IMAGE_MAX_OUTPUT_BYTES = int(os.getenv("SVG_IMAGE_MAX_OUTPUT_BYTES", str(8 * 1024 * 1024)))
+except ValueError as exc:
+    raise RuntimeError(
+        "SVG_IMAGE_TOOL_MAX_CALLS, SVG_IMAGE_MAX_SIDE and SVG_IMAGE_MAX_OUTPUT_BYTES "
+        "must be integers."
+    ) from exc
+if not (256 <= SVG_IMAGE_MAX_SIDE <= 4096):
+    raise RuntimeError("SVG_IMAGE_MAX_SIDE must be between 256 and 4096")
+if not (64 * 1024 <= SVG_IMAGE_MAX_OUTPUT_BYTES <= 10 * 1024 * 1024):
+    raise RuntimeError("SVG_IMAGE_MAX_OUTPUT_BYTES must be between 64 KB and 10 MB")
+SVG_IMAGE_TOOL_MAX_CALLS = max(1, SVG_IMAGE_TOOL_MAX_CALLS)
+# Optional canvas colour; empty keeps the SVG's own (possibly transparent) background.
+SVG_IMAGE_BACKGROUND = os.getenv("SVG_IMAGE_BACKGROUND", "").strip()
+SVG_IMAGE_AVAILABLE = SVG_IMAGE_ENABLED and svg_image.is_available()
+SVG_IMAGE_UNAVAILABLE_REASON = (
+    svg_image.unavailable_reason() if SVG_IMAGE_ENABLED and not SVG_IMAGE_AVAILABLE else ""
+)
+
 MEMORY_STOPWORDS = {"و", "در", "به", "از", "که", "این", "را", "با", "برای", "یک", "است", "شده", "هم", "تا", "یا", "اما", "اگر", "چون", "the", "a", "an", "is", "are", "was", "were", "be", "to", "of", "in", "for", "on", "with", "at", "by", "from", "and", "or", "but", "not", "this", "that", "it", "as"}
 VIDEO_CONTEXT_TTL = 30 * 60
 YOUTUBE_URL_PATTERN = re.compile(
@@ -264,6 +292,9 @@ logging.basicConfig(
 for _noisy in ("httpx", "httpcore"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger("aura-telegram-bot")
+
+if SVG_IMAGE_UNAVAILABLE_REASON:
+    logger.warning("SVG image authoring disabled: %s", SVG_IMAGE_UNAVAILABLE_REASON)
 
 if not POLLINATIONS_ENABLED:
     logger.info("Pollinations image features are disabled (POLLINATIONS_ENABLED=false).")
@@ -693,6 +724,11 @@ def build_system_prompt(update: Optional[Update] = None) -> str:
     # client is configured, so Aura never advertises a tool she cannot use.
     if pollinations_client.is_configured:
         prompt += "\n\n" + _image_generation_prompt_section()
+
+    # Vector image authoring depends only on the local renderer, so it is
+    # advertised independently of any external image service or quota.
+    if SVG_IMAGE_AVAILABLE:
+        prompt += "\n\n" + _svg_image_prompt_section()
 
     if FOUNDER_USER_ID:
         prompt += f"""\n\nFounder relationship (internal context):
@@ -1842,6 +1878,96 @@ def _tool_generate_image(args: dict) -> dict:
     }
 
 
+# ---------- SVG (vector) image tool ----------
+
+_SVG_TOOL_DESCRIPTION = (
+    "Create a real picture by writing SVG markup, which Aura then rasterises to a "
+    "PNG and delivers to the user automatically. This runs locally: it costs "
+    "nothing, uses no image quota, and needs no external service. Best for logos, "
+    "icons, charts, diagrams, flowcharts, infographics, UI mockups, badges, "
+    "posters, simple flat illustrations and stickers, and for anything that needs "
+    "exact text in Persian or English. Not for photorealistic photos, real people, "
+    "or highly detailed painterly scenes. Follow the SVG rules from the system "
+    "instructions: standalone markup with xmlns, explicit width/height or viewBox, "
+    "no scripts, no <foreignObject>, no external links or embedded network images. "
+    "Give the drawing an explicit background rectangle when it should not be "
+    "transparent, and keep text short and inside the canvas. If the renderer "
+    "reports an error, read it, fix the markup, and call the tool again."
+)
+
+
+def _build_create_svg_image_declaration() -> types.FunctionDeclaration:
+    return types.FunctionDeclaration(
+        name="create_svg_image",
+        description=_SVG_TOOL_DESCRIPTION,
+        parameters_json_schema={
+            "type": "object",
+            "properties": {
+                "svg": {
+                    "type": "string",
+                    "description": (
+                        "Complete, standalone SVG document. Start with <svg "
+                        "xmlns=\"http://www.w3.org/2000/svg\" and include width, "
+                        "height or viewBox."
+                    ),
+                },
+            },
+            "required": ["svg"],
+        },
+    )
+
+
+def _tool_create_svg_image(args: dict) -> dict:
+    """Render model-written SVG in the worker thread and queue it for delivery.
+
+    The PNG never enters Gemini's function response; it goes into the per-request
+    delivery queue injected by AgentRunner and is sent after the text reply.
+    """
+    if not SVG_IMAGE_AVAILABLE:
+        return {"ok": False, "error": "SVG image creation is currently unavailable."}
+    svg = str(args.get("svg") or "")
+    if not svg.strip():
+        return {"ok": False, "error": "The svg argument is empty."}
+    delivery = args.get("_image_delivery")
+    if not isinstance(delivery, list):
+        logger.error("SVG tool has no delivery queue; refusing to render an undeliverable image")
+        return {"ok": False, "error": "Image delivery is not available in this context."}
+
+    try:
+        image = render_svg_image(
+            svg,
+            max_side=SVG_IMAGE_MAX_SIDE,
+            background=SVG_IMAGE_BACKGROUND,
+            max_output_bytes=SVG_IMAGE_MAX_OUTPUT_BYTES,
+        )
+    except SvgError as exc:
+        # The technical detail goes to the model so it can repair its own markup;
+        # the user only ever sees Aura's natural-language answer.
+        logger.warning("SVG tool failed | code=%s | %s", exc.code or "-", exc)
+        return {
+            "ok": False,
+            "error": str(exc)[:400],
+            "safe_user_message": exc.user_message,
+        }
+    except Exception:
+        logger.exception("Unexpected SVG tool failure")
+        return {"ok": False, "error": "SVG rendering failed unexpectedly."}
+
+    delivery.append(image)
+    logger.info(
+        "SVG tool rendered | width=%s height=%s bytes=%s",
+        image.width, image.height, len(image.data),
+    )
+    return {
+        "ok": True,
+        "status": "ready",
+        "note": (
+            "The SVG was rendered and is being delivered to the user automatically. "
+            "Do not paste the SVG code in the reply unless the user asked for the code."
+        ),
+    }
+
+
 def _create_tool_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(name="web_search", declaration=_build_tool_search_declaration(), handler=_tool_web_search, max_calls_per_run=WEB_SEARCH_TOOL_MAX_CALLS)
@@ -1856,6 +1982,15 @@ def _create_tool_registry() -> ToolRegistry:
     # handler answers "disabled" and the model simply continues with text.
     if STICKERS_ENABLED and sticker_manager.is_configured():
         registry.register(name="send_sticker", declaration=_build_send_sticker_declaration(), handler=_tool_send_sticker, max_calls_per_run=STICKER_TOOL_MAX_CALLS)
+    # Vector images are local and quota-free, so this tool is always advertised
+    # whenever the renderer loads — even without a Pollinations key.
+    if SVG_IMAGE_AVAILABLE:
+        registry.register(
+            name="create_svg_image",
+            declaration=_build_create_svg_image_declaration(),
+            handler=_tool_create_svg_image,
+            max_calls_per_run=SVG_IMAGE_TOOL_MAX_CALLS,
+        )
     # Image tools are advertised only when a Pollinations key is configured.
     if pollinations_client.is_configured:
         registry.register(
@@ -3318,8 +3453,12 @@ async def _send_generated_image(
     return False
 
 
-async def _deliver_generated_images(update: Update, images: list[GeneratedImage]) -> None:
-    """Deliver images queued by the generate_image tool after the text reply."""
+async def _deliver_generated_images(update: Update, images: list) -> None:
+    """Deliver images queued by the image tools after the text reply.
+
+    Accepts GeneratedImage (photo model) and SvgImage (locally rendered PNG);
+    both expose ``data``, ``filename`` and ``telegram_safe_photo``.
+    """
     for image in images:
         sent = await _send_generated_image(update, image)
         logger.info(
@@ -3368,6 +3507,30 @@ def _prepare_pollinations_prompt(model: str, text: str, *, mode: str) -> str:
     return original[:POLLINATIONS_MAX_PROMPT_CHARS]
 
 
+_SVG_OFFER_TEXT = (
+    "اگر بخوای، همین تصویر رو می‌تونم به‌صورت گرافیکی و برداری (SVG) برات بسازم؛ "
+    "بگو تا انجامش بدم."
+)
+
+
+def _svg_fallback_hint(error: Optional[PollinationsError] = None) -> str:
+    """Return a Persian SVG offer when the photo generator is unavailable.
+
+    Content-policy rejections never get an offer: Aura must not suggest a way
+    around a safety filter. Everything else (quota, credits, access, outage)
+    is exactly the situation where the local vector path is useful.
+    """
+    if not SVG_IMAGE_AVAILABLE:
+        return ""
+    if error is not None:
+        code = (error.code or "").lower()
+        if error.status_code == 422 or "content" in code or "policy" in code:
+            return ""
+        if error.status_code is not None and error.status_code not in {401, 402, 403, 429, 500, 502, 503, 504}:
+            return ""
+    return "\n\n" + _SVG_OFFER_TEXT
+
+
 async def _run_image_generation(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -3398,7 +3561,7 @@ async def _run_image_generation(
             "Image generation failed | status=%s code=%s model=%s | %s",
             exc.status_code, exc.code or "-", pollinations_client.image_model, exc,
         )
-        await _safe_reply_text(update, exc.user_message)
+        await _safe_reply_text(update, exc.user_message + _svg_fallback_hint(exc))
         return
     except Exception:
         logger.exception("Unexpected image generation failure")
@@ -3555,8 +3718,15 @@ async def image_command(
     if not update.message:
         return
     if not pollinations_client.is_configured:
+        note = (
+            "\n\nولی می‌تونم تصویر رو به‌صورت گرافیکی و برداری (SVG) برات بسازم؛ "
+            "فقط توضیح بده چه چیزی می‌خوای."
+            if SVG_IMAGE_AVAILABLE
+            else ""
+        )
         await update.message.reply_text(
             "قابلیت ساخت عکس فعلاً روی Aura فعال نیست. اگر کلید سرویس تصویر تنظیم شود، از همین دستور می‌توانی استفاده کنی."
+            + note
         )
         return
 
@@ -3760,6 +3930,36 @@ def _image_generation_prompt_section() -> str:
         "- If the tool returns ok=false, apologize briefly in natural Persian using the provided error, and offer to try again. Do not expose HTTP status codes, endpoints, model IDs, API keys, or other implementation details.",
         "- Never imply that an image was created unless the tool result says it succeeded.",
         "- Aura can also edit a photo the user sends with an edit caption. If the user asks to edit an image but has not attached one, ask them to send the photo.",
+    ])
+
+
+def _svg_image_prompt_section() -> str:
+    """Vector-image guidance appended whenever Aura can render SVG locally."""
+    photo_tool = (
+        "The photorealistic image tool (generate_image) still exists and stays the "
+        "right choice for photos, realistic people, animals, and detailed painted or "
+        "3D-looking scenes."
+        if pollinations_client.is_configured
+        else "The photorealistic image tool (generate_image) is not available on this "
+        "deployment, so vector images are Aura's only way to produce a picture."
+    )
+    return "\n".join([
+        "Vector images (SVG):",
+        "- Aura can create real pictures by writing SVG code herself with the create_svg_image tool. She renders the markup to a PNG locally and the finished image is delivered to the user automatically. This path is free, offline, unlimited, fast, and independent of any image-generation quota.",
+        "- " + photo_tool,
+        "- Prefer create_svg_image for anything graphic or diagrammatic: logos, icons, avatars in flat/line style, charts and graphs, diagrams, flowcharts, infographics, timelines, UI mockups, posters, badges, certificates, maps, simple flat illustrations, and any picture that needs exact Persian or English text, exact colors, crisp shapes, or mathematical precision.",
+        "- Do not use it for photorealistic results, real identifiable people, or detailed painterly scenes; say honestly what it can and cannot do instead of pretending.",
+        "- If generate_image fails because of quota, credits, rate limits, missing access, or an upstream outage, do not just apologize: tell the user briefly that this kind of picture can also be made as a clean vector/graphic image, and create it with create_svg_image right away when the request suits vector art (or offer it when the request is photo-like).",
+        "- If the user asks whether Aura can draw or make an image, or asks how to work around a generation limit, mention this vector capability naturally, in Persian, without exposing tool names, source code, endpoints, or internal parameters.",
+        "- When the user explicitly asks for SVG code, the markup, or a .svg file, answer with the code itself in a fenced code block instead of calling the tool.",
+        "- Writing rules for the svg argument:",
+        "  - Produce one complete standalone document starting with <svg xmlns=\"http://www.w3.org/2000/svg\"> and a sensible width, height or viewBox; keep it reasonably compact.",
+        "  - Use only shapes, paths, groups, transforms, gradients, clip paths and simple filters. No <script>, no event handlers, no <foreignObject>, no external images, fonts, CSS @import or http(s) links, and no animation.",
+        "  - Text renders with the bundled Vazirmatn font. Write Persian text normally and in logical order; never pre-reverse or hand-shape it, and do not rely on emoji or uncommon fonts.",
+        "  - Keep text short, sized generously (roughly 16px or larger at the SVG's own scale), positioned inside the canvas, and avoid overlapping shapes; for right-aligned Persian lines use text-anchor=\"end\" near the right edge, or text-anchor=\"middle\" for centered titles.",
+        "  - Give the drawing an explicit background rectangle when it should not be transparent, and keep the composition inside the declared canvas.",
+        "  - If the tool returns ok=false, read the technical error, correct the markup, and call it again (a couple of attempts are fine). Never paste the broken SVG to the user.",
+        "- After ok=true, acknowledge it in one short natural Persian sentence; the image arrives automatically. Do not repeat the SVG code unless the user asked for code.",
     ])
 
 
@@ -3969,8 +4169,14 @@ async def message_handler(
     # `/image` in a photo caption never reaches CommandHandler (Telegram commands
     # are text-only), so answer it here even when the feature is disabled.
     if image_requested and extract_image_command_prompt(text) is not None and not pollinations_client.is_configured:
+        note = (
+            "\n\nولی می‌تونم تصویر رو به‌صورت گرافیکی و برداری (SVG) برات بسازم؛ "
+            "فقط توضیح بده چه چیزی می‌خوای."
+            if SVG_IMAGE_AVAILABLE
+            else ""
+        )
         await update.message.reply_text(
-            "قابلیت ساخت عکس فعلاً روی Aura فعال نیست."
+            "قابلیت ساخت عکس فعلاً روی Aura فعال نیست." + note
         )
         return
 
@@ -4173,7 +4379,15 @@ async def message_handler(
                     "The current user message is an explicit request to create a new image. "
                     "Call generate_image in this turn with a detailed English prompt that "
                     "preserves the requested subject and details. Do not merely promise, "
-                    "describe, or explain how to create the image."
+                    "describe, or explain how to create the image. "
+                    + (
+                        "If generate_image fails because of quota, credits, rate limits, "
+                        "missing access, or an upstream outage, and the picture suits vector "
+                        "art, deliver it anyway with create_svg_image in the same turn; "
+                        "otherwise offer the vector version in your reply."
+                        if SVG_IMAGE_AVAILABLE
+                        else ""
+                    )
                 ),
             }]
 
@@ -4187,8 +4401,10 @@ async def message_handler(
                 "user_id": update.effective_user.id,
                 "is_group": is_group(update),
             }
-        image_delivery: list[GeneratedImage] = []
-        if pollinations_client.is_configured:
+        # One shared queue for both image tools: photos from generate_image and
+        # PNGs rendered from SVG by create_svg_image are sent after the reply.
+        image_delivery: list = []
+        if pollinations_client.is_configured or SVG_IMAGE_AVAILABLE:
             sticker_context["image_delivery"] = image_delivery
 
         answer, usage, tool_events = await asyncio.to_thread(

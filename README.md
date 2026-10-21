@@ -13,6 +13,7 @@ This repository contains the public application code and configuration template.
 - Group-chat triggers and speaker awareness
 - Telegram image handling / vision input
 - Image generation from text and image-to-image editing via Pollinations.ai (optional)
+- Quota-free vector image creation: Aura writes SVG herself and it is rendered locally to PNG
 - Smart sticker sending (model-chosen tags from a personal sticker pack, with cooldowns)
 - Configurable model and search settings
 - Environment-based secrets and configuration
@@ -24,6 +25,7 @@ This repository contains the public application code and configuration template.
 - A Google AI Studio / Gemini API key
 - Optional: a You.com API key for web search
 - Optional: a Pollinations.ai API key for image generation and editing
+- Optional: `resvg-py` (already in `requirements.txt`) for local SVG rendering
 
 ## Installation
 
@@ -82,6 +84,11 @@ GEMINI_MODEL=gemini-3.1-flash-lite
 - `POLLINATIONS_IMAGE_HEIGHT`
 - `POLLINATIONS_TOOL_MAX_CALLS`
 - `POLLINATIONS_UPLOAD_PRIVACY`
+- `SVG_IMAGE_ENABLED`
+- `SVG_IMAGE_TOOL_MAX_CALLS`
+- `SVG_IMAGE_MAX_SIDE`
+- `SVG_IMAGE_MAX_OUTPUT_BYTES`
+- `SVG_IMAGE_BACKGROUND`
 
 ## Stickers
 
@@ -115,6 +122,43 @@ and prompt limits are configurable in `.env`; see `.env.example`.
 
 No additional Python package is required — the client uses `requests`, which is
 already a dependency.
+
+
+## Vector images (SVG)
+
+Gemini can already write SVG markup, so Aura can turn that into a real picture
+without any image service. When `resvg-py` is importable, Aura registers a
+`create_svg_image` tool: the model writes the SVG, `svg_image.py` validates it
+and rasterises it to PNG locally, and the finished image is delivered exactly
+like a generated photo.
+
+This path is free, offline, unlimited, and independent of any image-generation
+quota. Aura's system prompt tells her to prefer it for logos, icons, charts,
+diagrams, infographics, UI mockups, posters, badges, flat illustrations, and
+anything that needs exact Persian/English text — and to offer it proactively
+when `generate_image` hits a quota, credit, rate-limit, or availability error.
+Photorealistic requests stay with the Pollinations photo models.
+
+Rendering rules enforced by `svg_image.py`:
+
+- The markup is cleaned up first: code fences and XML/DOCTYPE prologs are
+  stripped, `<script>` and `<foreignObject>` elements are removed, inline
+  `font-family` declarations are dropped, and any external reference
+  (`http(s)` links, `@import`, `<image href>` to a remote host) is rejected.
+- `width`/`height` (px, pt, pc, mm, cm, in) or `viewBox` must define a canvas.
+  Small drawings are scaled up to a readable PNG, large ones are capped by
+  `SVG_IMAGE_MAX_SIDE`.
+- Persian text works out of the box: `resvg` performs Arabic shaping and the
+  bidi algorithm itself, so text stays logical and is never pre-reversed. The
+  bundled Vazirmatn fonts in `assets/fonts/` (OFL licensed) are registered with
+  the renderer and applied through a stylesheet, because a bare server usually
+  has no Persian font installed.
+- Not supported by the renderer: `<foreignObject>`, animation, external images
+  and fonts, and some advanced SVG filters.
+
+If `resvg-py` is missing, the tool is not registered, Aura never mentions the
+capability, and everything else keeps working. Set `SVG_IMAGE_ENABLED=false` to
+turn it off explicitly.
 
 ## Run
 

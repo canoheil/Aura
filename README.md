@@ -91,6 +91,9 @@ GEMINI_MODEL=gemini-3.1-flash-lite
 - `SVG_IMAGE_MAX_SIDE`
 - `SVG_IMAGE_MAX_OUTPUT_BYTES`
 - `SVG_IMAGE_BACKGROUND`
+- `WEB_SEARCH_ENFORCE`
+- `WEB_SEARCH_ENFORCE_SOFT_LIMIT`
+- `WEB_SEARCH_FORCE_TERMS`
 - `WEATHER_ENABLED`
 - `WEATHER_GEOCODE_URL`
 - `WEATHER_FORECAST_URL`
@@ -175,6 +178,42 @@ Rendering rules enforced by `svg_image.py`:
 If `resvg-py` is missing, the tool is not registered, Aura never mentions the
 capability, and everything else keeps working. Set `SVG_IMAGE_ENABLED=false` to
 turn it off explicitly.
+
+## Freshness gate (why Aura searches without being told)
+
+A model cannot notice that its own knowledge is stale: it does not know what day
+it is, so "who is the president" and "what is the latest release" both feel
+answerable from memory and the answer that comes back is whatever was true when
+training ended. `freshness_policy.py` makes that call in the application instead:
+it looks at the user's exact wording and returns one of three decisions.
+
+| Decision | Meaning | Example |
+| --- | --- | --- |
+| `force` | time-dependent question about a named subject | «قیمت دلار چنده»، "latest Python version" |
+| `hint` | time-dependent wording, subject unclear | «قیمت چنده»، «آیا هنوز پشتیبانی میشه» |
+| `off` | stable knowledge, chit-chat, or another tool owns it | «معنی این کلمه»، «یه میم بده» |
+
+On `force` the first agent round is generated with Gemini's tool mode pinned to
+`web_search`, so the model cannot answer from memory at all; later rounds are
+normal. On `hint` Aura is told to search unless she is sure. On `off` nothing is
+added and the turn costs no quota.
+
+Cost is bounded on purpose:
+
+- a forced search only happens for `force`, which additionally requires a real
+  subject, so bare follow-ups never pay;
+- the prompt spells out what must not be searched (opinions, code,
+  translation, weather, memes) so ordinary chat stays search-free;
+- cached answers cost nothing (`WEB_SEARCH_CACHE_TTL`), duplicate identical
+  calls inside a turn are merged by the agent runner, and `WEB_SEARCH_DAILY_LIMIT`
+  remains a hard stop;
+- `WEB_SEARCH_ENFORCE_SOFT_LIMIT` stops forcing for the rest of the day once that
+  many searches were spent (0 = 80% of the daily limit), leaving the remaining
+  quota for questions that genuinely need it;
+- `WEB_SEARCH_ENFORCE=false` keeps the prompt guidance and turns the forcing off.
+
+`WEB_SEARCH_FORCE_TERMS` adds comma-separated words of your own (a game name, a
+ticker, a channel-specific product) to the force vocabulary.
 
 ## Weather and memes
 

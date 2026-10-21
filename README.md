@@ -104,6 +104,7 @@ GEMINI_MODEL=gemini-3.1-flash-lite
 - `MEME_API_BASE_URL`
 - `MEME_API_FALLBACK_URL`
 - `MEME_API_TIMEOUT`
+- `MEME_FETCH_BUDGET_SECONDS`
 - `MEME_MAX_BYTES`
 - `MEME_ALLOW_NSFW`
 - `MEME_ALLOWED_SUBREDDITS`
@@ -237,6 +238,17 @@ size cap, refuses NSFW/spoiler posts and non-images, skips memes already sent
 recently, and maps topic words to sensible subreddits
 ("پرنده" → `birdmemes`). The fetched bytes are delivered after the text reply and
 shown to Gemini in the same agent turn, so Aura comments on the actual picture.
+The tool and its guidance are only advertised on turns that are actually about
+memes (a request, a question about one, or a short «یکی دیگه» follow-up), so an
+ordinary chat message never carries the extra tool declaration, the extra model
+round trip, or a Reddit download.
+
+A fetch is bounded by one total deadline, `MEME_FETCH_BUDGET_SECONDS` (default
+20s, 5-60), in addition to `MEME_API_TIMEOUT` per request: a dead or hanging
+service can slow one meme request, but never for minutes. Inside that budget an
+unknown subreddit is not retried, an unreachable or rate-limiting mirror is
+abandoned for the fallback, and a post whose image was already sent is discarded
+before its bytes are downloaded.
 Set `MEME_ALLOW_NSFW=true` to accept NSFW-tagged posts (spoilers stay blocked
 either way), and `MEME_ALLOWED_SUBREDDITS` to pin a whitelist.
 

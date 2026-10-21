@@ -126,6 +126,42 @@ def test_looks_like_meme_request_rejects_talk_about():
     assert meme_api.looks_like_meme_request("میم ها خیلی بامزه اند") is False
 
 
+def test_could_involve_a_meme_is_off_for_ordinary_chat():
+    # The advertisement switch must never fire on messages that are not about
+    # memes: that is what kept fetch_meme in every request.
+    for text in (
+        "سلام، چطوری؟",
+        "خوبی؟",
+        "امروز حالت چطوره",
+        "بریم سینما",
+        "این چیه؟",
+        "بگو ببینم",
+        "داشتم میمون می‌دیدم",
+        "میمیرم از خستگی",
+        "Give me a joke",
+        "show me how to code python",
+        "What's the weather like?",
+        "",
+    ):
+        assert meme_api.could_involve_a_meme(text) is False, text
+
+
+def test_could_involve_a_meme_is_on_for_meme_turns():
+    for text in (
+        "یه میم بده",
+        "میم بده",
+        "یه میم پرنده بده",
+        "send me a meme about cats",
+        "میم ها خیلی بامزه اند",
+        "این میم رو تحلیل کن",
+        "یکی دیگه",
+        "باز یکی دیگه",
+        "another one",
+        "one more please",
+    ):
+        assert meme_api.could_involve_a_meme(text) is True, text
+
+
 def test_extract_meme_topic():
     assert meme_api.extract_meme_topic("یه میم پرنده بده") == "پرنده"
     assert meme_api.extract_meme_topic("send me a meme about cats") == "cats"
@@ -187,17 +223,33 @@ def test_fetch_success():
 def test_fetch_rejects_nsfw():
     sess = Mock()
     pl = _payload(nsfw=True)
-    sess.get.side_effect = [FakeResp(json_data=pl), FakeResp(json_data=pl)]
+    sess.get.side_effect = [FakeResp(json_data=pl)]
     client = MemeClient(enabled=True, base_urls=("https://meme-api.com",), fallback_urls=(), session=sess, allow_nsfw=False, timeout=5)
     with pytest.raises(MemeError) as exc:
         client.fetch(subreddit="memes")
     assert exc.value.code == "nsfw"
 
 
+def test_fetch_rerolls_a_rollable_failure():
+    # NSFW is per post, not per subreddit: asking again can bring a clean meme.
+    sess = Mock()
+    bad = _payload(nsfw=True)
+    good = _payload(url="https://i.redd.it/clean.jpg", title="clean")
+    sess.get.side_effect = [
+        FakeResp(json_data=bad),
+        FakeResp(json_data=good),
+        FakeResp(content=JPEG_BYTES, iter_chunks=[JPEG_BYTES]),
+    ]
+    client = MemeClient(enabled=True, base_urls=("https://meme-api.com",), fallback_urls=(), session=sess, timeout=5)
+    meme = client.fetch(subreddit="memes", attempts_per_candidate=2)
+    assert meme.source_url == "https://i.redd.it/clean.jpg"
+    assert sess.get.call_count == 3
+
+
 def test_fetch_rejects_video_url():
     sess = Mock()
     pl = _payload(url="https://v.redd.it/abc123")
-    sess.get.side_effect = [FakeResp(json_data=pl), FakeResp(json_data=pl)]
+    sess.get.side_effect = [FakeResp(json_data=pl)]
     client = MemeClient(enabled=True, base_urls=("https://meme-api.com",), fallback_urls=(), session=sess, timeout=5)
     with pytest.raises(MemeError) as exc:
         client.fetch(subreddit="memes")
@@ -209,8 +261,6 @@ def test_fetch_rejects_too_large():
     pl = _payload()
     big = b"\xff\xd8\xff\xe0" + b"0" * (7 * 1024 * 1024)
     sess.get.side_effect = [
-        FakeResp(json_data=pl),
-        FakeResp(content=big, iter_chunks=[big[: 1024 * 1024], big[1024 * 1024 :]]),
         FakeResp(json_data=pl),
         FakeResp(content=big, iter_chunks=[big[: 1024 * 1024], big[1024 * 1024 :]]),
     ]
@@ -229,23 +279,24 @@ def test_fetch_dedup():
     client = MemeClient(enabled=True, base_urls=("https://meme-api.com",), fallback_urls=(), session=sess, timeout=5)
     m1 = client.fetch(subreddit="memes")
     assert m1.source_url == "https://i.redd.it/dup.jpg"
-    # second fetch would get same dup.jpg again, should retry and get new.jpg
+    # The same dup.jpg comes back, but its bytes are not downloaded again: the
+    # known URL is skipped straight away and the next roll is asked instead.
     sess.get.side_effect = [
         FakeResp(json_data=pl1),
-        FakeResp(content=JPEG_BYTES, iter_chunks=[JPEG_BYTES]),
         FakeResp(json_data=pl2),
         FakeResp(content=PNG_BYTES, iter_chunks=[PNG_BYTES]),
     ]
-    m2 = client.fetch(subreddit="memes")
+    sess.get.reset_mock()
+    m2 = client.fetch(subreddit="memes", attempts_per_candidate=2)
     assert m2.source_url == "https://i.redd.it/new.jpg"
+    assert sess.get.call_count == 3, "the repeated image must not be downloaded again"
 
 
 def test_fetch_fallback_url():
     sess = Mock()
     pl = _payload()
-    # primary base fails with 500, fallback succeeds
+    # primary base fails with 500, the mirror succeeds on the very next try
     sess.get.side_effect = [
-        FakeResp(status_code=500, json_data=None),
         FakeResp(status_code=500, json_data=None),
         FakeResp(json_data=pl),
         FakeResp(content=JPEG_BYTES, iter_chunks=[JPEG_BYTES]),
@@ -253,15 +304,78 @@ def test_fetch_fallback_url():
     client = MemeClient(enabled=True, base_urls=("https://meme-api.com",), fallback_urls=("https://meme-api.aelx.de",), session=sess, timeout=5)
     meme = client.fetch(subreddit="memes")
     assert meme.title == "hi"
+    assert sess.get.call_count == 3
+    assert sess.get.call_args_list[1].args[0].startswith("https://meme-api.aelx.de")
+
+
+def test_fetch_does_not_hang_on_a_rate_limiting_base():
+    # 429 says "not now", not "this subreddit is wrong": go to the mirror at once.
+    sess = Mock()
+    pl = _payload()
+    sess.get.side_effect = [
+        FakeResp(status_code=429, json_data=None),
+        FakeResp(json_data=pl),
+        FakeResp(content=JPEG_BYTES, iter_chunks=[JPEG_BYTES]),
+    ]
+    client = MemeClient(enabled=True, base_urls=("https://meme-api.com",), fallback_urls=("https://meme-api.aelx.de",), session=sess, timeout=5)
+    meme = client.fetch(topic="cats")
+    assert meme.title == "hi"
+    assert sess.get.call_args_list[1].args[0].startswith("https://meme-api.aelx.de")
+
+
+def test_fetch_does_not_retry_an_unknown_subreddit():
+    sess = Mock()
+    sess.get.side_effect = [FakeResp(status_code=404, json_data=None)]
+    client = MemeClient(enabled=True, base_urls=("https://meme-api.com",), fallback_urls=(), session=sess, timeout=5)
+    with pytest.raises(MemeError) as exc:
+        client.fetch(subreddit="nonexistentsubreddit123", attempts_per_candidate=2)
+    assert exc.value.code == "not_found"
+    assert sess.get.call_count == 1, "a missing subreddit cannot be fixed by asking again"
 
 
 def test_fetch_404_maps_to_not_found():
     sess = Mock()
-    sess.get.side_effect = [FakeResp(status_code=404, json_data=None), FakeResp(status_code=404, json_data=None)]
+    sess.get.side_effect = [FakeResp(status_code=404, json_data=None)]
     client = MemeClient(enabled=True, base_urls=("https://meme-api.com",), fallback_urls=(), session=sess, timeout=5)
     with pytest.raises(MemeError) as exc:
         client.fetch(subreddit="nonexistentsubreddit123")
     assert exc.value.code == "not_found"
+
+
+def test_fetch_stops_at_the_time_budget(monkeypatch):
+    # A slow service must be cut off by the total deadline, not only by the
+    # per-request timeout: this fake spends 4s on every single call.
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(meme_api.time, "monotonic", lambda: clock["now"])
+
+    def slow_500(*args, **kwargs):
+        clock["now"] += 4.0
+        return FakeResp(status_code=500, json_data=None)
+
+    sess = Mock()
+    sess.get.side_effect = slow_500
+    client = MemeClient(
+        enabled=True,
+        base_urls=("https://meme-api.com",),
+        fallback_urls=(),
+        session=sess,
+        timeout=12,
+        fetch_budget_seconds=10,
+    )
+    with pytest.raises(MemeError):
+        client.fetch(topic="cats")
+    # 10s budget / 4s per call: three calls fit, the fourth would overrun it.
+    assert sess.get.call_count == 3, sess.get.call_count
+
+
+def test_fetch_budget_defaults_and_clamps():
+    assert meme_api.DEFAULT_FETCH_BUDGET_SECONDS == 20.0
+    default = MemeClient(enabled=True, base_urls=("https://meme-api.com",), fallback_urls=())
+    assert default.fetch_budget_seconds == 20.0
+    tiny = MemeClient(enabled=True, base_urls=("https://meme-api.com",), fallback_urls=(), fetch_budget_seconds=1)
+    assert tiny.fetch_budget_seconds == 5.0
+    huge = MemeClient(enabled=True, base_urls=("https://meme-api.com",), fallback_urls=(), fetch_budget_seconds=999)
+    assert huge.fetch_budget_seconds == 60.0
 
 
 def test_meme_disabled():
@@ -303,12 +417,45 @@ def test_bot_meme_prompt_section():
     assert "fetch a real meme" in source.lower()
 
 
+def test_bot_advertises_the_meme_tool_only_on_meme_turns():
+    source = (ROOT / "bot.py").read_text(encoding="utf-8")
+    assert "could_involve_a_meme" in source
+    # ask_gemini forwards the per-turn switch into the config builder.
+    assert "allow_meme_tool=allow_meme_tool" in source
+    assert "allow_meme_tool=meme_turn" in source
+    # the declaration is filtered out, and a hallucinated call is refused.
+    assert 'item.name != "fetch_meme"' in source
+    assert 'args.get("_meme_allowed") is False' in source
+    assert 'runtime_context["meme_allowed"]' in source
+
+
+def test_bot_does_not_paint_the_meme_section_into_every_prompt():
+    source = (ROOT / "bot.py").read_text(encoding="utf-8")
+    build = source.split("def build_system_prompt")[1].split("def is_founder")[0]
+    # The standing system prompt must not describe the meme tool: only a turn
+    # that can use it may mention it.
+    assert "_memes_prompt_section()" not in build
+    # ... and the section is injected per turn instead.
+    handler = source.split("async def message_handler")[1]
+    assert "could_involve_a_meme(text)" in handler
+    assert "_memes_prompt_section()" in handler
+
+
 def test_bot_meme_env_validation():
     source = (ROOT / "bot.py").read_text(encoding="utf-8")
     assert "MEMES_ENABLED" in source
     assert "MEME_API_BASE_URL" in source
     assert "MEME_ALLOW_NSFW" in source
     assert "MEME_MAX_BYTES" in source
+
+
+def test_bot_passes_the_fetch_budget_to_the_client():
+    source = (ROOT / "bot.py").read_text(encoding="utf-8")
+    assert 'os.getenv("MEME_FETCH_BUDGET_SECONDS", "20")' in source
+    assert "MEME_FETCH_BUDGET_SECONDS must be between 5 and 60 seconds" in source
+    assert "fetch_budget_seconds=MEME_FETCH_BUDGET_SECONDS" in source
+    env = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "MEME_FETCH_BUDGET_SECONDS=20" in env
 
 
 def test_bot_delivery_handles_meme():

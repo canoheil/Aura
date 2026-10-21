@@ -9,11 +9,14 @@ queue and the vision round; this layer owns the policy and the network I/O:
 * download the actual image bytes (never a bare URL) with a hard size cap,
 * refuse NSFW/spoiler posts, non-images and unknown/blocked subreddits,
 * avoid repeating a meme the bot already sent recently,
-* fall back to a mirror when the primary service is down.
+* fall back to a mirror when the primary service is down,
+* finish - succeed or fail - inside one total time budget, so a broken service
+  can never hold a reply for minutes.
 
 The public API is small: :class:`MemeClient`, :class:`Meme`, :class:`MemeError`,
-plus :func:`looks_like_meme_request` and :func:`extract_meme_topic` which give
-the chat pipeline a conservative, testable hint.
+plus :func:`looks_like_meme_request`, :func:`could_involve_a_meme` and
+:func:`extract_meme_topic` which give the chat pipeline a conservative,
+testable hint.
 """
 from __future__ import annotations
 
@@ -38,6 +41,11 @@ DEFAULT_BASE_URL = "https://meme-api.com"
 DEFAULT_FALLBACK_URL = "https://meme-api.aelx.de"
 
 DEFAULT_TIMEOUT_SECONDS = 12.0
+# One deadline for the whole fetch, not only per HTTP request. A dead or
+# hanging mirror must never keep a Telegram reply waiting for minutes.
+DEFAULT_FETCH_BUDGET_SECONDS = 20.0
+MIN_FETCH_BUDGET_SECONDS = 5.0
+MAX_FETCH_BUDGET_SECONDS = 60.0
 DEFAULT_MAX_BYTES = 6 * 1024 * 1024
 TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024
 _PHOTO_MIME_TYPES = {"image/jpeg", "image/png"}
@@ -52,12 +60,25 @@ _MAX_SUBREDDIT_CANDIDATES = 3
 _MAX_IMAGE_BYTES_HARD_LIMIT = 10 * 1024 * 1024
 _MIN_IMAGE_BYTES_HARD_LIMIT = 256 * 1024
 
+# Never start an attempt with less time than this, and never give a single HTTP
+# request less than _MIN_REQUEST_TIMEOUT: a request with a 0.05s timeout can only
+# produce a pointless error.
+_MIN_ATTEMPT_SECONDS = 0.75
+_MIN_REQUEST_TIMEOUT = 0.5
+
+# A broken base is not retried for every remaining candidate: if the API itself
+# is unreachable or rate limiting, the mirror is the next useful step.
+_ABANDON_BASE_CODES = frozenset({"unreachable", "rate_limited"})
+# A missing subreddit stays missing for this base; re-rolling cannot help.
+_ABANDON_CANDIDATE_CODES = frozenset({"not_found", "bad_subreddit", "not_allowed"})
+
 DEFAULT_SUBREDDITS = ("memes", "dankmemes", "me_irl", "wholesomememes")
 
 _USER_MESSAGE_UNAVAILABLE = "الان نتونستم میم بگیرم؛ سرویس میم جواب نداد. یه بار دیگه امتحان کن."
 _USER_MESSAGE_NOT_FOUND = "برای این موضوع میمی پیدا نکردم. یه موضوع دیگه بگو تا امتحان کنم."
 _USER_MESSAGE_NOT_IMAGE = "این یکی فایل تصویری نبود و نشد بفرستمش. یکی دیگه امتحان می‌کنم."
 _USER_MESSAGE_TOO_LARGE = "این میم زیادی سنگین بود و نشد بفرستمش."
+_USER_MESSAGE_BUDGET = "سرویس میم این بار خیلی کند بود؛ یه بار دیگه امتحان کن."
 _USER_MESSAGE_BLOCKED = "از این سابردیت نمی‌تونم میم بیارم."
 _USER_MESSAGE_BAD_SUBREDDIT = "اسم این سابردیت معتبر نیست."
 
@@ -188,6 +209,14 @@ _LEADING_MEME = re.compile(
     rf"^(?:(?:یه|یک|دو|سه|چند)\s+)?(?:میم|میمس|memes?)(?![A-Za-z{_FA_AR_LETTERS}])",
     flags=re.IGNORECASE,
 )
+# Short follow-ups after a meme was already sent («یکی دیگه»). They contain no
+# meme keyword at all, so the advertisement switch has to name them explicitly.
+_MEME_FOLLOWUP = re.compile(
+    r"(?:یکی دیگه|یه دیگه|یکی دیگر|باز یکی|باز هم یکی|دوباره یکی|"
+    r"another one|one more|next one|more memes?)",
+    flags=re.IGNORECASE,
+)
+_FOLLOWUP_STRIP = " \t!?.,;:؛،؟…()[]{}«»\"'"
 
 _TOPIC_FILLERS = {
     "لطفا", "لطفاً", "برام", "برای", "من", "واسه", "واسم", "به", "از", "درباره",
@@ -251,6 +280,27 @@ def looks_like_meme_request(text: str) -> bool:
     return False
 
 
+def could_involve_a_meme(text: str) -> bool:
+    """Decide whether the fetch_meme tool should be offered for this message.
+
+    This is the *advertisement* switch, not the request classifier. A tool that
+    is declared on every turn can be called on any turn, so ordinary chat must
+    never carry it. It therefore returns True only when the message actually
+    mentions memes (a request, a question about one, or a joke about them) or is
+    a short "another one" follow-up. Everything else - greetings, questions,
+    work talk - stays completely free of the tool.
+    """
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    if _MEME_WORD.search(normalized.lower()):
+        return True
+    # A follow-up is a short phrase ("باز یکی دیگه", "another one please"); a long
+    # sentence that merely contains one of those words is not a meme turn.
+    stripped = normalized.strip(_FOLLOWUP_STRIP)
+    return len(stripped) <= 40 and bool(_MEME_FOLLOWUP.search(stripped))
+
+
 def extract_meme_topic(text: str) -> Optional[str]:
     """Return the requested meme topic without the request boilerplate."""
     normalized = normalize_text(text)
@@ -307,6 +357,7 @@ class MemeClient:
         base_urls: Sequence[str] = (DEFAULT_BASE_URL,),
         fallback_urls: Sequence[str] = (DEFAULT_FALLBACK_URL,),
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        fetch_budget_seconds: float = DEFAULT_FETCH_BUDGET_SECONDS,
         max_bytes: int = DEFAULT_MAX_BYTES,
         allow_nsfw: bool = False,
         allowed_subreddits: Sequence[str] = (),
@@ -323,6 +374,9 @@ class MemeClient:
                 bases.append(cleaned)
         self._base_urls = tuple(bases)
         self._timeout = max(3.0, min(60.0, float(timeout)))
+        self._fetch_budget = max(
+            MIN_FETCH_BUDGET_SECONDS, min(MAX_FETCH_BUDGET_SECONDS, float(fetch_budget_seconds))
+        )
         self._max_bytes = max(_MIN_IMAGE_BYTES_HARD_LIMIT, min(_MAX_IMAGE_BYTES_HARD_LIMIT, int(max_bytes)))
         self._allow_nsfw = bool(allow_nsfw)
         self._allowed_subreddits = {
@@ -348,6 +402,10 @@ class MemeClient:
     @property
     def max_bytes(self) -> int:
         return self._max_bytes
+
+    @property
+    def fetch_budget_seconds(self) -> float:
+        return self._fetch_budget
 
     @property
     def allowed_subreddits(self) -> tuple[str, ...]:
@@ -426,9 +484,23 @@ class MemeClient:
         *,
         topic: Optional[str] = None,
         subreddit: Optional[str] = None,
-        attempts_per_candidate: int = 2,
+        attempts_per_candidate: int = 1,
+        budget_seconds: Optional[float] = None,
     ) -> Meme:
-        """Fetch one usable meme or raise :class:`MemeError`."""
+        """Fetch one usable meme or raise :class:`MemeError`.
+
+        The whole operation is bounded by one deadline (``budget_seconds``,
+        default ``DEFAULT_FETCH_BUDGET_SECONDS``), not just by per-request
+        timeouts, so a dead or hanging service can never keep a Telegram reply
+        waiting for minutes. Inside that budget the cheap tricks are used first:
+
+        * a failure that cannot change by asking again (unknown subreddit) is
+          not retried, it moves on to the next candidate immediately,
+        * an unreachable or rate-limiting base is abandoned for the mirror
+          instead of being asked again for every remaining candidate,
+        * a post whose image was already sent is discarded before its bytes are
+          downloaded, so a duplicate costs one small JSON call instead of 6 MB.
+        """
         if not self.is_enabled:
             raise MemeError(
                 "Meme fetching is disabled.",
@@ -437,40 +509,78 @@ class MemeClient:
             )
         candidates = self.candidate_subreddits(topic=topic, subreddit=subreddit)
         attempts = max(1, min(3, int(attempts_per_candidate)))
+        budget = self._fetch_budget if budget_seconds is None else float(budget_seconds)
+        budget = max(_MIN_ATTEMPT_SECONDS, budget)
+        deadline = time.monotonic() + budget
         last_error: Optional[MemeError] = None
+        abandoned_bases: set[str] = set()
+        attempts_made = 0
+        exhausted = False
 
         for base in self._base_urls:
+            if exhausted or base in abandoned_bases:
+                continue
             for candidate in candidates:
+                if exhausted or base in abandoned_bases:
+                    break
                 for _ in range(attempts):
+                    remaining = deadline - time.monotonic()
+                    if remaining < _MIN_ATTEMPT_SECONDS:
+                        exhausted = True
+                        break
+                    attempts_made += 1
                     try:
-                        payload = self._request_json(base, candidate)
-                        meme = self._download_meme(payload, expected_subreddit=candidate)
+                        payload = self._request_json(base, candidate, timeout=remaining)
+                        image_url = payload.get("url")
+                        if isinstance(image_url, str) and self._is_recent(image_url):
+                            last_error = MemeError(
+                                "The service returned a meme that was already sent recently.",
+                                code="repeat",
+                                user_message=_USER_MESSAGE_NOT_FOUND,
+                            )
+                            logger.info(
+                                "Meme fetch repeated a recent image; skipped before download | subreddit=%s",
+                                candidate,
+                            )
+                            continue
+                        meme = self._download_meme(
+                            payload,
+                            expected_subreddit=candidate,
+                            timeout=deadline - time.monotonic(),
+                        )
                     except MemeError as exc:
                         last_error = exc
                         logger.info(
-                            "Meme fetch attempt failed | subreddit=%s code=%s | %s",
-                            candidate, exc.code or "-", exc,
+                            "Meme fetch attempt failed | base=%s subreddit=%s code=%s | %s",
+                            base, candidate, exc.code or "-", exc,
                         )
-                        continue
-                    if self._is_recent(meme.source_url):
-                        last_error = MemeError(
-                            "The service returned a meme that was already sent recently.",
-                            code="repeat",
-                            user_message=_USER_MESSAGE_NOT_FOUND,
-                        )
-                        logger.info("Meme fetch repeated a recent image; retrying | subreddit=%s", candidate)
+                        if exc.code in _ABANDON_BASE_CODES:
+                            logger.info(
+                                "Meme base abandoned | base=%s code=%s", base, exc.code,
+                            )
+                            abandoned_bases.add(base)
+                            break
+                        if exc.code in _ABANDON_CANDIDATE_CODES:
+                            break
                         continue
                     self._remember(meme.source_url)
                     logger.info(
-                        "Meme fetched | subreddit=%s title_chars=%s bytes=%s mime=%s",
+                        "Meme fetched | subreddit=%s title_chars=%s bytes=%s mime=%s attempts=%s",
                         meme.subreddit, len(meme.title), len(meme.data), meme.mime_type,
+                        attempts_made,
                     )
                     return meme
+                if exhausted:
+                    break
 
+        if exhausted:
+            logger.warning(
+                "Meme fetch budget exhausted | budget=%.1fs | attempts=%s", budget, attempts_made,
+            )
         raise last_error or MemeError(
             "Meme service did not return a usable meme.",
-            code="unavailable",
-            user_message=_USER_MESSAGE_UNAVAILABLE,
+            code="budget" if exhausted else "unavailable",
+            user_message=_USER_MESSAGE_BUDGET if exhausted else _USER_MESSAGE_UNAVAILABLE,
         )
 
     # ---------- internals ----------
@@ -485,12 +595,21 @@ class MemeClient:
         with self._lock:
             self._recent_urls.append(url)
 
-    def _request_json(self, base: str, subreddit: str) -> dict:
+    def _bounded_timeout(self, timeout: Optional[float]) -> float:
+        """Never let one request outlive the remaining fetch budget."""
+        if timeout is None:
+            return self._timeout
+        return max(_MIN_REQUEST_TIMEOUT, min(self._timeout, float(timeout)))
+
+    def _request_json(
+        self, base: str, subreddit: str, *, timeout: Optional[float] = None
+    ) -> dict:
         url = f"{base}/gimme/{subreddit}"
+        effective = self._bounded_timeout(timeout)
         try:
             response = self.session.get(
                 url,
-                timeout=(min(6.0, self._timeout), self._timeout),
+                timeout=(min(6.0, effective), effective),
                 headers={"Accept": "application/json"},
             )
         except requests.RequestException as exc:
@@ -546,7 +665,9 @@ class MemeClient:
                 return first
         return payload
 
-    def _download_meme(self, payload: dict, *, expected_subreddit: str) -> Meme:
+    def _download_meme(
+        self, payload: dict, *, expected_subreddit: str, timeout: Optional[float] = None
+    ) -> Meme:
         if payload.get("nsfw") is True and not self._allow_nsfw:
             raise MemeError("Meme was marked NSFW.", code="nsfw", user_message=_USER_MESSAGE_NOT_FOUND)
         if payload.get("spoiler") is True:
@@ -559,7 +680,7 @@ class MemeClient:
         if not parsed.netloc or _looks_like_video_url(parsed):
             raise MemeError("Meme URL points to a video, not an image.", code="not_image", user_message=_USER_MESSAGE_NOT_IMAGE)
 
-        data, mime_type = self._download_bytes(image_url)
+        data, mime_type = self._download_bytes(image_url, timeout=timeout)
         if not mime_type:
             raise MemeError("Downloaded file was not a recognised image.", code="not_image", user_message=_USER_MESSAGE_NOT_IMAGE)
         if mime_type not in _SUPPORTED_MIME_TYPES:
@@ -578,18 +699,21 @@ class MemeClient:
             spoiler=bool(payload.get("spoiler")),
         )
 
-    def _download_bytes(self, image_url: str) -> tuple[bytes, str]:
+    def _download_bytes(self, image_url: str, *, timeout: Optional[float] = None) -> tuple[bytes, str]:
+        effective = self._bounded_timeout(timeout)
         try:
             response = self.session.get(
                 image_url,
-                timeout=(min(6.0, self._timeout), self._timeout),
+                timeout=(min(6.0, effective), effective),
                 stream=True,
                 headers={"Accept": "image/*,*/*;q=0.5"},
             )
         except requests.RequestException as exc:
             raise MemeError(
                 f"Meme image download failed ({type(exc).__name__}).",
-                code="unreachable",
+                # A different code from the API being unreachable: this one is
+                # about the image host for one post, not about the base itself.
+                code="image_unreachable",
                 user_message=_USER_MESSAGE_UNAVAILABLE,
             ) from exc
 

@@ -301,12 +301,20 @@ MEME_ALLOWED_SUBREDDITS = tuple(
 )
 try:
     MEME_API_TIMEOUT = int(os.getenv("MEME_API_TIMEOUT", "12"))
+    MEME_FETCH_BUDGET_SECONDS = int(os.getenv("MEME_FETCH_BUDGET_SECONDS", "20"))
     MEME_MAX_BYTES = int(os.getenv("MEME_MAX_BYTES", str(6 * 1024 * 1024)))
     MEME_TOOL_MAX_CALLS = int(os.getenv("MEME_TOOL_MAX_CALLS", "2"))
 except ValueError as exc:
-    raise RuntimeError("MEME_API_TIMEOUT, MEME_MAX_BYTES and MEME_TOOL_MAX_CALLS must be integers.") from exc
+    raise RuntimeError(
+        "MEME_API_TIMEOUT, MEME_FETCH_BUDGET_SECONDS, MEME_MAX_BYTES and "
+        "MEME_TOOL_MAX_CALLS must be integers."
+    ) from exc
 if MEME_API_TIMEOUT < 3 or MEME_API_TIMEOUT > 60:
     raise RuntimeError("MEME_API_TIMEOUT must be between 3 and 60 seconds")
+# One deadline for a whole meme fetch: with the defaults above (12s per request)
+# a dead mirror could otherwise hold a reply for minutes.
+if MEME_FETCH_BUDGET_SECONDS < 5 or MEME_FETCH_BUDGET_SECONDS > 60:
+    raise RuntimeError("MEME_FETCH_BUDGET_SECONDS must be between 5 and 60 seconds")
 if MEME_MAX_BYTES < 256 * 1024 or MEME_MAX_BYTES > 10 * 1024 * 1024:
     raise RuntimeError("MEME_MAX_BYTES must be between 256 KB and 10 MB")
 MEME_TOOL_MAX_CALLS = max(1, min(3, MEME_TOOL_MAX_CALLS))
@@ -321,6 +329,7 @@ meme_client = MemeClient(
     base_urls=(MEME_API_BASE_URL,) if MEME_API_BASE_URL else (),
     fallback_urls=(MEME_API_FALLBACK_URL,) if MEME_API_FALLBACK_URL else (),
     timeout=MEME_API_TIMEOUT,
+    fetch_budget_seconds=MEME_FETCH_BUDGET_SECONDS,
     max_bytes=MEME_MAX_BYTES,
     allow_nsfw=MEME_ALLOW_NSFW,
     allowed_subreddits=MEME_ALLOWED_SUBREDDITS,
@@ -2163,10 +2172,14 @@ def _tool_fetch_meme(args: dict) -> dict:
 
     topic = str(args.get("topic") or "").strip()[:120]
     subreddit = str(args.get("subreddit") or "").strip()[:64]
+    started = time.monotonic()
     try:
         meme = meme_client.fetch(topic=topic or None, subreddit=subreddit or None)
     except MemeError as exc:
-        logger.warning("Meme tool failed | code=%s | %s", exc.code or "-", exc)
+        logger.warning(
+            "Meme tool failed | code=%s elapsed_ms=%.0f | %s",
+            exc.code or "-", (time.monotonic() - started) * 1000.0, exc,
+        )
         return {
             "ok": False,
             "error": str(exc),
@@ -2182,8 +2195,9 @@ def _tool_fetch_meme(args: dict) -> dict:
 
     delivery.append(meme)
     logger.info(
-        "Meme tool fetched | subreddit=%s upvotes=%s bytes=%s mime=%s animation=%s",
+        "Meme tool fetched | subreddit=%s upvotes=%s bytes=%s mime=%s animation=%s elapsed_ms=%.0f",
         meme.subreddit, meme.upvotes, len(meme.data), meme.mime_type, meme.is_animation,
+        (time.monotonic() - started) * 1000.0,
     )
     return {
         "ok": True,

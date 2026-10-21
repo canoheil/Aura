@@ -14,6 +14,8 @@ This repository contains the public application code and configuration template.
 - Telegram image handling / vision input
 - Image generation from text and image-to-image editing via Pollinations.ai (optional)
 - Quota-free vector image creation: Aura writes SVG herself and it is rendered locally to PNG
+- Current conditions and 3-day forecast for any city via Open-Meteo (keyless)
+- Real Reddit memes fetched with a keyless API, then commented on from the actual picture
 - Smart sticker sending (model-chosen tags from a personal sticker pack, with cooldowns)
 - Configurable model and search settings
 - Environment-based secrets and configuration
@@ -89,6 +91,23 @@ GEMINI_MODEL=gemini-3.1-flash-lite
 - `SVG_IMAGE_MAX_SIDE`
 - `SVG_IMAGE_MAX_OUTPUT_BYTES`
 - `SVG_IMAGE_BACKGROUND`
+- `WEB_SEARCH_ENFORCE`
+- `WEB_SEARCH_ENFORCE_SOFT_LIMIT`
+- `WEB_SEARCH_FORCE_TERMS`
+- `WEATHER_ENABLED`
+- `WEATHER_GEOCODE_URL`
+- `WEATHER_FORECAST_URL`
+- `WEATHER_TIMEOUT`
+- `WEATHER_CACHE_TTL`
+- `WEATHER_TOOL_MAX_CALLS`
+- `MEMES_ENABLED`
+- `MEME_API_BASE_URL`
+- `MEME_API_FALLBACK_URL`
+- `MEME_API_TIMEOUT`
+- `MEME_MAX_BYTES`
+- `MEME_ALLOW_NSFW`
+- `MEME_ALLOWED_SUBREDDITS`
+- `MEME_TOOL_MAX_CALLS`
 
 ## Stickers
 
@@ -159,6 +178,70 @@ Rendering rules enforced by `svg_image.py`:
 If `resvg-py` is missing, the tool is not registered, Aura never mentions the
 capability, and everything else keeps working. Set `SVG_IMAGE_ENABLED=false` to
 turn it off explicitly.
+
+## Freshness gate (why Aura searches without being told)
+
+A model cannot notice that its own knowledge is stale: it does not know what day
+it is, so "who is the president" and "what is the latest release" both feel
+answerable from memory and the answer that comes back is whatever was true when
+training ended. `freshness_policy.py` makes that call in the application instead:
+it looks at the user's exact wording and returns one of three decisions.
+
+| Decision | Meaning | Example |
+| --- | --- | --- |
+| `force` | time-dependent question about a named subject | «قیمت دلار چنده»، "latest Python version" |
+| `hint` | time-dependent wording, subject unclear | «قیمت چنده»، «آیا هنوز پشتیبانی میشه» |
+| `off` | stable knowledge, chit-chat, or another tool owns it | «معنی این کلمه»، «یه میم بده» |
+
+On `force` the first agent round is generated with Gemini's tool mode pinned to
+`web_search`, so the model cannot answer from memory at all; later rounds are
+normal. On `hint` Aura is told to search unless she is sure. On `off` nothing is
+added and the turn costs no quota.
+
+Cost is bounded on purpose:
+
+- a forced search only happens for `force`, which additionally requires a real
+  subject, so bare follow-ups never pay;
+- the prompt spells out what must not be searched (opinions, code,
+  translation, weather, memes) so ordinary chat stays search-free;
+- cached answers cost nothing (`WEB_SEARCH_CACHE_TTL`), duplicate identical
+  calls inside a turn are merged by the agent runner, and `WEB_SEARCH_DAILY_LIMIT`
+  remains a hard stop;
+- `WEB_SEARCH_ENFORCE_SOFT_LIMIT` stops forcing for the rest of the day once that
+  many searches were spent (0 = 80% of the daily limit), leaving the remaining
+  quota for questions that genuinely need it;
+- `WEB_SEARCH_ENFORCE=false` keeps the prompt guidance and turns the forcing off.
+
+`WEB_SEARCH_FORCE_TERMS` adds comma-separated words of your own (a game name, a
+ticker, a channel-specific product) to the force vocabulary.
+
+## Weather and memes
+
+Both features are keyless, need no extra dependencies, and run fine on shared
+hosting: they are plain HTTPS calls with `requests`.
+
+`weather_api.py` registers a `get_weather` tool. Aura passes the city exactly as
+the user wrote it (Persian or English); the module resolves it with the
+Open-Meteo geocoding API, fetches current conditions plus a 3-day forecast, maps
+WMO weather codes to Persian descriptions, and caches a city for
+`WEATHER_CACHE_TTL` seconds so repeated questions cannot hammer the free
+service. Only a compact summary reaches the model — never the raw payload. A
+local hint recognises explicit questions («هوای تهران چطوره؟»,
+«آب و هوا مشهد»، "weather in Berlin") and makes sure the tool is actually called,
+while talk-about sentences ("درباره هواشناسی چیکار کنم", "چند درجه سرد شده") and
+image/meme requests stay out of it.
+
+`meme_api.py` registers `fetch_meme`, which picks a real Reddit post from
+meme-api.com (with a mirror fallback), downloads the image bytes with a hard
+size cap, refuses NSFW/spoiler posts and non-images, skips memes already sent
+recently, and maps topic words to sensible subreddits
+("پرنده" → `birdmemes`). The fetched bytes are delivered after the text reply and
+shown to Gemini in the same agent turn, so Aura comments on the actual picture.
+Set `MEME_ALLOW_NSFW=true` to accept NSFW-tagged posts (spoilers stay blocked
+either way), and `MEME_ALLOWED_SUBREDDITS` to pin a whitelist.
+
+Set `WEATHER_ENABLED=false` or `MEMES_ENABLED=false` to drop the tools and their
+prompt guidance entirely; nothing else changes.
 
 ## Run
 

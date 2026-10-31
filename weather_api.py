@@ -116,10 +116,14 @@ def wmo_description(code: int, lang: str = "fa") -> str:
 class WeatherError(Exception):
     """A weather fetch failure with a human-readable Persian message."""
 
-    def __init__(self, message: str, *, code: str = "", user_message: str = _USER_MESSAGE_UNAVAILABLE) -> None:
+    def __init__(
+        self, message: str, *, code: str = "", user_message: str = _USER_MESSAGE_UNAVAILABLE,
+        choices: tuple[ResolvedLocation, ...] = (),
+    ) -> None:
         super().__init__(message[:400])
         self.code = code
         self.user_message = user_message
+        self.choices = tuple(choices)
 
 
 @dataclass(frozen=True)
@@ -131,6 +135,24 @@ class ResolvedLocation:
     longitude: float
     timezone: str
     country_code: str = ""
+
+
+def format_location_choices(choices: tuple[ResolvedLocation, ...]) -> str:
+    labels = []
+    for loc in choices:
+        parts = [loc.name]
+        if loc.admin1 and loc.admin1.casefold() != loc.name.casefold():
+            parts.append(loc.admin1)
+        if loc.country or loc.country_code:
+            parts.append(loc.country or loc.country_code)
+        labels.append("، ".join(parts))
+    lines = ["چند شهر با این نام پیدا کردم؛ کدام را می‌خواهی؟"]
+    for i, (loc, label) in enumerate(zip(choices, labels), 1):
+        if labels.count(label) > 1:
+            label += f" ({loc.latitude:.2f}, {loc.longitude:.2f})"
+        lines.append(f"{i}. {label}")
+    lines.append("شمارهٔ گزینه را در پاسخ به همین پیام بفرست.")
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -282,14 +304,21 @@ def extract_weather_location(text: str) -> Optional[str]:
     normalized = normalize_text(text)
     if not normalized:
         return None
-    cleaned = _STRIP_PATTERN.sub(" ", normalized)
-    cleaned = re.sub(r"[?؟.!،,؛;:\"'()\[\]{}«»]", " ", cleaned)
-    kept = [
-        token
-        for token in cleaned.split()
-        if token.lower() not in _LOCATION_FILLERS and len(token) > 1
-    ]
-    location = re.sub(r"\s+", " ", " ".join(kept)).strip()
+    # Keep comma-separated region/country qualifiers. Open-Meteo's name
+    # parameter wants the city alone; _geocode matches the remaining parts to
+    # candidate regions instead of silently dropping the user's disambiguation.
+    parts = []
+    for part in re.split(r"[,،]", normalized):
+        cleaned = _STRIP_PATTERN.sub(" ", part)
+        cleaned = re.sub(r"[?؟.!؛;:\"'()\[\]{}«»]", " ", cleaned)
+        kept = [
+            token
+            for token in cleaned.split()
+            if token.lower() not in _LOCATION_FILLERS and len(token) > 1
+        ]
+        if kept:
+            parts.append(" ".join(kept))
+    location = ", ".join(parts).strip()
     if len(location) < 2 or location.lower() in _LOCATION_FILLERS:
         return None
     return location[:_MAX_LOCATION_CHARS]
@@ -364,7 +393,7 @@ class WeatherClient:
         self._timeout = max(3.0, min(30.0, float(timeout)))
         self._cache_ttl = max(60.0, min(3600.0, float(cache_ttl)))
         self._session = session
-        self._owned_session: Optional[requests.Session] = None
+        self._thread_sessions = threading.local()
         self._cache: dict[str, tuple[float, WeatherReport]] = {}
         self._cache_lock = threading.Lock()
 
@@ -376,14 +405,15 @@ class WeatherClient:
     def session(self) -> requests.Session:
         if self._session is not None:
             return self._session
-        if self._owned_session is None:
-            s = requests.Session()
-            s.headers.update({
+        session = getattr(self._thread_sessions, "session", None)
+        if session is None:
+            session = requests.Session()
+            session.headers.update({
                 "User-Agent": "AuraBot/1.0 (weather; +https://github.com/canoheil/Aura)",
                 "Accept": "application/json",
             })
-            self._owned_session = s
-        return self._owned_session
+            self._thread_sessions.session = session
+        return session
 
     def get_weather(self, location: str) -> WeatherReport:
         """Resolve location and fetch weather, or raise :class:`WeatherError`."""
@@ -416,18 +446,28 @@ class WeatherClient:
         )
         return report
 
-    def _geocode(self, query: str) -> ResolvedLocation:
-        """Resolve a free-text place into coordinates.
+    def get_weather_for_location(self, location: ResolvedLocation) -> WeatherReport:
+        """Fetch exactly the location selected by the user, without re-geocoding."""
+        if not self.is_enabled:
+            raise WeatherError("Weather is disabled.", code="disabled", user_message="قابلیت هواشناسی فعال نیست.")
+        if not isinstance(location, ResolvedLocation):
+            raise WeatherError("Invalid selected location.", code="bad_location", user_message=_USER_MESSAGE_BAD_LOCATION)
+        return self._forecast(location)
 
-        The user's own wording is always tried first (localized for Persian
-        questions); only when the geocoder has nothing to say do we retry with
-        the Latin spelling from :data:`PERSIAN_PLACE_NAMES`.
+    def _geocode(self, query: str) -> ResolvedLocation:
+        """Resolve a place, refusing to silently choose between namesakes.
+
+        Open-Meteo expects a city name in ``name``; comma-separated country or
+        region qualifiers are matched against the returned candidates locally.
         """
-        has_persian = bool(re.search(r"[\u0600-\u06ff]", query))
+        parts = [normalize_text(part) for part in re.split(r"[,،]", query) if normalize_text(part)]
+        base = parts[0] if parts else query
+        qualifiers = [part.casefold() for part in parts[1:]]
+        has_persian = bool(re.search(r"[\u0600-\u06ff]", base))
         languages = ("fa", "en") if has_persian else ("en", "fa")
-        candidates = [query]
-        latin = transliterate_place(query)
-        if latin and latin.lower() != query.lower():
+        candidates = [base]
+        latin = transliterate_place(base)
+        if latin and latin.lower() != base.lower():
             candidates.append(latin)
 
         last_error: Optional[WeatherError] = None
@@ -436,44 +476,83 @@ class WeatherClient:
                 try:
                     payload = self._get_json(
                         self._geocode_url,
-                        {"name": candidate, "count": 3, "language": lang, "format": "json"},
+                        {"name": candidate, "count": 10, "language": lang, "format": "json"},
                         label="Geocoding",
                     )
                 except WeatherError as exc:
-                    # A missing result is a reason to try the next variant; a
-                    # rate limit or outage is not, so those surface immediately.
                     if exc.code != "not_found":
                         raise
                     last_error = exc
                     continue
-                hit = self._pick_result(payload)
-                if hit is not None:
-                    return ResolvedLocation(
-                        name=str(hit.get("name") or candidate).strip(),
-                        country=str(hit.get("country") or "").strip(),
-                        admin1=str(hit.get("admin1") or "").strip(),
-                        latitude=float(hit["latitude"]),
-                        longitude=float(hit["longitude"]),
-                        timezone=str(hit.get("timezone") or "auto").strip() or "auto",
-                        country_code=str(hit.get("country_code") or "").strip(),
+                hits = self._usable_results(payload)
+                if qualifiers:
+                    hits = [hit for hit in hits if all(
+                        any(q == normalize_text(str(hit.get(field) or "")).casefold()
+                            for field in ("country", "country_code", "admin1", "admin2"))
+                        for q in qualifiers
+                    )]
+                if hits:
+                    # Ignore merely similar names, but not two places that
+                    # actually share the chosen name and differ geographically.
+                    name = normalize_text(str(hits[0].get("name") or candidate)).casefold()
+                    exact = [hit for hit in hits if normalize_text(str(hit.get("name") or candidate)).casefold() == name]
+                    locations: list[ResolvedLocation] = []
+                    for hit in exact:
+                        location = self._resolved_location(hit, candidate)
+                        if not any(
+                            (prior.country_code.casefold(), prior.country.casefold(), prior.admin1.casefold())
+                            == (location.country_code.casefold(), location.country.casefold(), location.admin1.casefold())
+                            and abs(prior.latitude - location.latitude) < 0.04
+                            and abs(prior.longitude - location.longitude) < 0.04
+                            for prior in locations
+                        ):
+                            locations.append(location)
+                    if len(locations) == 1:
+                        return locations[0]
+                    choices = tuple(locations[:5])
+                    raise WeatherError(
+                        "More than one matching city; user selection required.",
+                        code="ambiguous", user_message=format_location_choices(choices), choices=choices,
                     )
                 last_error = WeatherError(
                     f"No geocoding results for {candidate!r} (lang={lang})",
-                    code="not_found",
-                    user_message=_USER_MESSAGE_NOT_FOUND,
+                    code="not_found", user_message=_USER_MESSAGE_NOT_FOUND,
                 )
         raise last_error or WeatherError("Geocoding found nothing.", code="not_found", user_message=_USER_MESSAGE_NOT_FOUND)
 
     @staticmethod
-    def _pick_result(payload: dict) -> Optional[dict]:
-        """First usable result; the geocoder already orders them by relevance."""
+    def _usable_results(payload: dict) -> list[dict]:
         results = payload.get("results") if isinstance(payload, dict) else None
         if not isinstance(results, list):
-            return None
+            return []
+        usable = []
         for hit in results:
-            if isinstance(hit, dict) and hit.get("latitude") is not None and hit.get("longitude") is not None:
-                return hit
-        return None
+            if not isinstance(hit, dict):
+                continue
+            try:
+                latitude, longitude = float(hit["latitude"]), float(hit["longitude"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if -90 <= latitude <= 90 and -180 <= longitude <= 180:
+                usable.append(hit)
+        return usable
+
+    @staticmethod
+    def _resolved_location(hit: dict, candidate: str) -> ResolvedLocation:
+        def safe(value: object) -> str:
+            return re.sub(r"[\x00-\x1f\x7f]+", " ", str(value or "")).strip()[:80]
+        return ResolvedLocation(
+            name=safe(hit.get("name") or candidate), country=safe(hit.get("country")),
+            admin1=safe(hit.get("admin1")), latitude=float(hit["latitude"]),
+            longitude=float(hit["longitude"]), timezone=safe(hit.get("timezone")) or "auto",
+            country_code=safe(hit.get("country_code")),
+        )
+
+    @staticmethod
+    def _pick_result(payload: dict) -> Optional[dict]:
+        """First usable result; retained for callers that only need one hit."""
+        results = WeatherClient._usable_results(payload)
+        return results[0] if results else None
 
     def _get_json(self, url: str, params: dict, *, label: str) -> dict:
         try:

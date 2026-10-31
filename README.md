@@ -11,7 +11,9 @@ This repository contains the public application code and configuration template.
 - Long-term memory
 - Guarded You.com web search
 - Group-chat triggers and speaker awareness
-- Telegram image handling / vision input
+- Telegram photos, image documents, direct voice/audio/video and short-term image follow-ups
+- Persistent one-shot reminders with a per-user timezone, listing and cancellation
+- Bounded concurrency across chats, with sequential updates within each chat
 - Image generation from text and image-to-image editing via Pollinations.ai (optional)
 - Quota-free vector image creation: Aura writes SVG herself and it is rendered locally to PNG
 - Current conditions and 3-day forecast for any city via Open-Meteo (keyless)
@@ -68,6 +70,10 @@ GEMINI_MODEL=gemini-3.1-flash-lite
 - `WEB_SEARCH_TIMEOUT`
 - `MAX_HISTORY_MESSAGES`
 - `REQUEST_TIMEOUT`
+- `MAX_CONCURRENT_CHATS`
+- `RECENT_IMAGE_CONTEXT_TTL`
+- `REMINDER_DEFAULT_TIMEZONE`
+- `REMINDER_POLL_SECONDS`
 - `STICKERS_ENABLED`
 - `STICKER_SET_NAME`
 - `STICKER_CONFIG_PATH`
@@ -136,6 +142,24 @@ image-to-image `image=` parameter, and sends the result back. Ambiguous captions
 uploads as unlisted public URLs for up to 30 days; `POLLINATIONS_UPLOAD_PRIVACY`
 (default `true`) strips EXIF/GPS metadata before the file leaves the bot.
 
+Telegram photos, supported image documents (JPEG, PNG, WebP, HEIC/HEIF), and
+direct or replied-to audio, voice, video, video notes and animation are supplied to Gemini
+inline when the selected model accepts their MIME type. Photo/image input is
+limited to 8 MiB; inline audio/video is limited to the smaller of 12 MiB and
+`FILE_MAX_SIZE_MB`, and Telegram's own download limit also applies. Other
+documents continue through the `file_analyze` tool. After a photo, Aura keeps
+only its Telegram `file_id` (not image bytes), scoped to the same chat and user,
+for up to `RECENT_IMAGE_CONTEXT_TTL` seconds (default 600). Recognizable short
+image follow-ups can therefore reuse it without another reply; `/new` or a bot
+restart clears this temporary context. Follow-up recognition is conservative
+and will not cover every phrasing.
+
+If Gemini emits an unexpected textual tool declaration instead of an answer, Aura
+retries once with the same media, evidence and tool restrictions. If it remains
+invalid, Aura returns an error rather than executing or storing the raw output.
+The retry adds one model request only when this problem occurs. A declaration
+explicitly supplied by the user can still be quoted in a technical discussion.
+
 The defaults are `flux` for generation and `kontext` for editing, with automatic
 fallbacks to `seedream` and `nanobanana`. All model names, timeouts, dimensions,
 and prompt limits are configurable in `.env`; see `.env.example`.
@@ -195,9 +219,18 @@ it looks at the user's exact wording and returns one of three decisions.
 | `off` | stable knowledge, chit-chat, or another tool owns it | «معنی این کلمه»، «یه میم بده» |
 
 On `force` the first agent round is generated with Gemini's tool mode pinned to
-`web_search`, so the model cannot answer from memory at all; later rounds are
-normal. On `hint` Aura is told to search unless she is sure. On `off` nothing is
-added and the turn costs no quota.
+`web_search`; if the provider rejects forced mode, Aura retries normally but
+still requires successful search evidence before presenting a current answer.
+If the search is unavailable, empty, or fails, Aura says it cannot verify the
+answer instead of presenting a remembered fact as current. The same evidence
+check applies when forcing is downgraded by the soft ceiling. On `hint` Aura is
+told to search unless she is sure; `off` adds nothing.
+
+Successful web tool results are displayed separately as “retrieved sources,”
+using only the returned HTTP(S) URLs. This label does not assert that every
+source supports every claim. Model-generated source sections are discarded
+unless copied from the user's own text, and code/indentation and literal arrays
+such as `[1]` are preserved.
 
 Cost is bounded on purpose:
 
@@ -226,11 +259,15 @@ the user wrote it (Persian or English); the module resolves it with the
 Open-Meteo geocoding API, fetches current conditions plus a 3-day forecast, maps
 WMO weather codes to Persian descriptions, and caches a city for
 `WEATHER_CACHE_TTL` seconds so repeated questions cannot hammer the free
-service. Only a compact summary reaches the model — never the raw payload. A
-local hint recognises explicit questions («هوای تهران چطوره؟»,
-«آب و هوا مشهد»، "weather in Berlin") and makes sure the tool is actually called,
-while talk-about sentences ("درباره هواشناسی چیکار کنم", "چند درجه سرد شده") and
-image/meme requests stay out of it.
+service. Only a compact summary reaches the model — never the raw payload. For
+an explicit weather question with a named city («هوای تهران چطوره؟»,
+«آب و هوا مشهد», "weather in Berlin"), Aura resolves and fetches the conditions
+before the model answers; talk-about sentences ("درباره هواشناسی چیکار کنم",
+"چند درجه سرد شده") and image/meme requests stay out of it. When geocoding returns multiple places with
+the same name, Aura asks the user to select a numbered location rather than
+silently choosing the first; the selection is scoped to that chat and user for
+five minutes. In a group, reply to Aura's question with the number. An explicit
+comma-separated region also works, e.g. “weather in Springfield, Massachusetts”.
 
 `meme_api.py` registers `fetch_meme`, which picks a real Reddit post from
 meme-api.com (with a mirror fallback), downloads the image bytes with a hard
@@ -241,7 +278,9 @@ shown to Gemini in the same agent turn, so Aura comments on the actual picture.
 The tool and its guidance are only advertised on turns that are actually about
 memes (a request, a question about one, or a short «یکی دیگه» follow-up), so an
 ordinary chat message never carries the extra tool declaration, the extra model
-round trip, or a Reddit download.
+round trip, or a Reddit download. If Telegram rejects both the image and its
+document fallback, Aura attempts to notify the user instead of silently
+claiming delivery.
 
 A fetch is bounded by one total deadline, `MEME_FETCH_BUDGET_SECONDS` (default
 20s, 5-60), in addition to `MEME_API_TIMEOUT` per request: a dead or hanging
@@ -254,6 +293,46 @@ either way), and `MEME_ALLOWED_SUBREDDITS` to pin a whitelist.
 
 Set `WEATHER_ENABLED=false` or `MEMES_ENABLED=false` to drop the tools and their
 prompt guidance entirely; nothing else changes.
+
+## Reminders
+
+Reminders are **one-shot**, saved in `bot.db`, and scoped to the requesting user
+and chat. The default timezone is `Asia/Tehran`; each user can choose another
+IANA timezone. Existing reminders retain their original UTC instant when the
+timezone changes.
+
+```text
+۱۰ دقیقه دیگه یادم بنداز آب بخورم
+یادم بنداز فردا ساعت ۹:۳۰ قرص بخورم
+/remind in 10m آب بخورم
+/remind 2030-11-01 09:30 جلسه
+/reminders
+/cancelreminder 12
+/timezone Europe/Berlin
+```
+
+Explicit dates use the **Gregorian calendar** and 24-hour time. Natural-language
+parsing is intentionally conservative: if the time or task is unclear, Aura
+asks for the supported format instead of claiming to have scheduled it. Repeat
+schedules are not supported. Nonexistent or repeated local times at daylight
+saving transitions are rejected; an explicit UTC offset, e.g.
+`2030-10-27 02:30+02:00`, disambiguates them. At most 100 pending reminders are
+allowed per user.
+
+A background worker resumes overdue reminders when the bot starts. It retries
+transient Telegram failures; permanent failures appear in `/reminders`, where
+they can be cancelled. Delivery requires the bot to be running and able to send
+to the chat. Run only one long-polling Aura instance against a database. A
+crash after Telegram accepts a message but before SQLite records success can
+cause a duplicate on restart; cancellation cannot recall a send already in
+progress.
+
+## Concurrency
+
+`MAX_CONCURRENT_CHATS` defaults to 4 and is clamped to 1–32. It bounds concurrent
+Telegram updates; commands and messages in the same chat are processed in order,
+while different chats can progress independently. Paid web calls are serialized
+per service to keep the existing daily quota checks safe.
 
 ## Run
 

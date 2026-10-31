@@ -391,7 +391,7 @@ class MemeClient:
         self._lock = threading.Lock()
         self._random = randomizer or random.Random()
         self._session = session
-        self._owned_session: Optional[requests.Session] = None
+        self._thread_sessions = threading.local()
 
     # ---------- public state ----------
 
@@ -417,7 +417,8 @@ class MemeClient:
     def session(self) -> requests.Session:
         if self._session is not None:
             return self._session
-        if self._owned_session is None:
+        session = getattr(self._thread_sessions, "session", None)
+        if session is None:
             session = requests.Session()
             session.headers.update({
                 "User-Agent": (
@@ -426,8 +427,8 @@ class MemeClient:
                 ),
                 "Accept": "application/json, image/*;q=0.9, */*;q=0.5",
             })
-            self._owned_session = session
-        return self._owned_session
+            self._thread_sessions.session = session
+        return session
 
     # ---------- candidates ----------
 

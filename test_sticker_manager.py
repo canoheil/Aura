@@ -303,6 +303,13 @@ def test_strip_sticker_marker_preserves_persian_text():
     assert strip_markers("سلام [sticker sent: excited] دنیا") == "سلام دنیا"
 
 
+def test_strip_sticker_marker_does_not_touch_code():
+    strip_markers = _bot_helper("_strip_sticker_markers")
+    code = "```python\n    return '[sticker: literal]'\n```\n`[sticker: inline]`"
+    assert strip_markers(code) == code
+    assert strip_markers(code + " [sticker: actual]").endswith("`[sticker: inline]`")
+
+
 def test_strip_sticker_marker_only_answer_is_empty():
     strip_markers = _bot_helper("_strip_sticker_markers")
     assert strip_markers("[sticker sent: excited]") == ""
@@ -310,10 +317,17 @@ def test_strip_sticker_marker_only_answer_is_empty():
 
 def test_bot_does_not_store_sticker_marker_in_history():
     tree = ast.parse(_bot_source())
+    # Only the model-answer handler can contain sticker markers. Local weather
+    # selection and other deterministic replies may also store an assistant turn.
+    handler = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "message_handler")
+    strip_line = next(
+        node.lineno for node in ast.walk(handler)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_strip_sticker_markers"
+    )
     assistant_contents = [
         node.args[2]
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
+        for node in ast.walk(handler)
+        if isinstance(node, ast.Call) and node.lineno > strip_line
         and isinstance(node.func, ast.Name)
         and node.func.id == "add_message"
         and len(node.args) >= 3

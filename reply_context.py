@@ -49,6 +49,8 @@ def build_reply_context(reply) -> Optional[str]:
         media_labels.append("document")
     if getattr(reply, "video", None):
         media_labels.append("video")
+    if getattr(reply, "video_note", None):
+        media_labels.append("video note")
     if getattr(reply, "audio", None):
         media_labels.append("audio")
     if getattr(reply, "voice", None):

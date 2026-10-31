@@ -259,7 +259,7 @@ def test_gate_runs_only_for_unowned_turns():
     assert "require_web_search = True" in gate
     assert 'logger.info("Freshness gate |' in gate
     # a media/document/video turn can never be forced into a search
-    assert "image_requested or document_requested or reply_has_media or active_video_url" in source
+    assert "image_requested or document_requested or media_requested or recent_image or reply_has_media or active_video_url" in source
     # weather and meme turns mark themselves owned before the gate runs
     weather_block = source.split("The same nudge for weather")[1].split("The same nudge for memes")[0]
     meme_block = source.split("The same nudge for memes")[1].split("Freshness gate")[0]
@@ -325,7 +325,8 @@ def _agent_namespace(*, client, registry, runner, max_rounds=3):
     from google.genai import types
 
     from retry_policy import call_with_retry, extract_status_code
-    from tool_system import AgentRunState
+    from tool_system import AgentRunState, has_textual_tool_declaration
+    from answer_quality import has_web_evidence, has_any_web_evidence
     from observability import RequestTrace
 
     _, funcs = _source_and_functions()
@@ -339,6 +340,9 @@ def _agent_namespace(*, client, registry, runner, max_rounds=3):
         "AGENT_RUNNER": runner,
         "TOOL_REGISTRY": registry,
         "AgentRunState": AgentRunState,
+        "has_textual_tool_declaration": has_textual_tool_declaration,
+        "has_web_evidence": has_web_evidence,
+        "has_any_web_evidence": has_any_web_evidence,
         "RequestTrace": RequestTrace,
         "call_with_retry": call_with_retry,
         "extract_status_code": extract_status_code,
@@ -389,7 +393,7 @@ class _FakeRunner:
 
     def execute_tool(self, state, name, args):
         self.calls.append((name, dict(args)))
-        result = {"ok": True, "results": [{"title": "طلای ۱۸ عیار", "snippet": "هر گرم ۴٬۲۰۰٬۰۰۰ ریال"}]}
+        result = {"ok": True, "results": [{"title": "طلای ۱۸ عیار", "url": "https://example.org/gold", "snippet": "هر گرم ۴٬۲۰۰٬۰۰۰ ریال"}]}
         state.events.append({"tool": name, "result": result})
         return result
 
@@ -456,7 +460,8 @@ def test_forcing_never_breaks_the_reply():
     answer, _usage, _events = ns["ask_gemini"](
         "test-model", [{"role": "user", "content": "قیمت طلا چنده"}], require_web_search=True
     )
-    assert "طلا" in answer
+    assert "۴٬۲۰۰٬۰۰۰" not in answer
+    assert "نمی‌تونم" in answer
     assert len(client.models.configs) >= 2
     assert _forced(client.models.configs[-1]) is None
 

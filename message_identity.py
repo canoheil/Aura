@@ -70,7 +70,7 @@ def build_message_identity_context(message) -> MessageIdentityContext:
 
     media_types: list[str] = []
     media_attrs = (
-        ("photo", "image"), ("document", "document"), ("video", "video"),
+        ("photo", "image"), ("document", "document"), ("video", "video"), ("video_note", "video note"),
         ("audio", "audio"), ("voice", "voice message"),
         ("animation", "animation"), ("sticker", "sticker"),
     )

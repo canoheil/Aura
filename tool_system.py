@@ -9,11 +9,88 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import logging
+import re
 from typing import Any, Callable, Optional
 
 from google.genai import types
 
 logger = logging.getLogger("aura-tools")
+
+
+# A model can emit an internal tool declaration as plain text rather than a
+# Gemini FunctionCall part. It is not a tool result and must never be executed
+# by parsing the string. Keep the signature narrow so ordinary mentions of
+# tool names, JSON and code are not mistaken for a malformed tool call.
+_TEXTUAL_TOOL_DECLARATION = re.compile(
+    r"\bdeclaration\s*:\s*default_api\s*:\s*[a-z_][a-z0-9_]*\s*[{(]",
+    re.IGNORECASE,
+)
+
+
+def _declaration_end(text: str, opening: int) -> Optional[int]:
+    """Find the end of a balanced declaration solely for literal comparison."""
+    pairs = {"{": "}", "(": ")", "[": "]"}
+    stack: list[str] = []
+    quote = ""
+    escaped = False
+    for i in range(opening, len(text)):
+        char = text[i]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            # Apostrophes in unquoted natural-language arguments ("can't") are
+            # not the start of a quoted string.
+            if char == "'" and i and i + 1 < len(text) and text[i - 1].isalnum() and text[i + 1].isalnum():
+                continue
+            quote = char
+        elif char in pairs:
+            stack.append(pairs[char])
+        elif char in pairs.values():
+            if not stack or char != stack.pop():
+                return None
+            if not stack:
+                return i + 1
+    return None
+
+
+def has_textual_tool_declaration(response: Any, *, user_text: str = "") -> bool:
+    """Detect leaked tool-call syntax in the first candidate's visible text.
+
+    Gemini may return text and actual function calls in separate parts. Inspect
+    the visible text before executing any calls, excluding thought parts just
+    like the SDK's ``response.text`` property. Reading the parts directly also
+    avoids the SDK warning about non-text parts in a normal tool response.
+    A complete declaration copied verbatim from the current user message is
+    allowed so the bot can still discuss a snippet the user explicitly gave it.
+    """
+    candidates = getattr(response, "candidates", None)
+    parts = None
+    if isinstance(candidates, (list, tuple)) and candidates:
+        content = getattr(candidates[0], "content", None)
+        parts = getattr(content, "parts", None)
+    if isinstance(parts, (list, tuple)):
+        text = "".join(
+            part.text for part in parts
+            if isinstance(getattr(part, "text", None), str)
+            and not getattr(part, "thought", False)
+        )
+    else:
+        text = getattr(response, "text", None)
+    if not isinstance(text, str):
+        return False
+
+    for match in _TEXTUAL_TOOL_DECLARATION.finditer(text):
+        end = _declaration_end(text, match.end() - 1) if user_text else None
+        if end is not None and text[match.start():end] in user_text:
+            continue
+        return True
+    return False
 
 
 @dataclass(frozen=True)

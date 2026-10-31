@@ -34,26 +34,59 @@ def _restore(value: str, protected: list[str]) -> str:
 
 
 def _protect_code(text: str, protected: list[str]) -> str:
-    # Fenced blocks first. Optional language labels are preserved as Telegram
-    # code-block language hints where possible.
-    fence_re = re.compile(r"```([A-Za-z0-9_+.-]+)?\n?(.*?)```", re.S)
+    # Scan left-to-right so Markdown fences containing HTML and HTML code
+    # containing backticks are each protected as a single literal unit.
+    pattern = re.compile(
+        r"```(?P<language>[A-Za-z0-9_+.-]+)?\r?\n?(?P<fenced>.*?)```"
+        r"|<pre\s*>(?P<pre>.*?)</pre\s*>"
+        r'|<code(?:\s+class="language-(?P<html_language>[A-Za-z0-9_+.-]+)")?\s*>(?P<html_code>.*?)</code\s*>'
+        r"|(?<!`)`(?P<inline>[^`\n]+)`(?!`)",
+        re.IGNORECASE | re.DOTALL,
+    )
 
-    def fence(match: re.Match[str]) -> str:
-        language = (match.group(1) or "").strip()
-        code = html.escape(match.group(2).strip("\n"), quote=False)
-        if language:
-            return _protect(f'<pre><code class="language-{html.escape(language, quote=True)}">{code}</code></pre>', protected)
-        return _protect(f"<pre>{code}</pre>", protected)
+    def protect(match: re.Match[str]) -> str:
+        if match.group("fenced") is not None:
+            language = match.group("language") or ""
+            code_text = match.group("fenced")
+            # Remove only the fence-delimiter newline, not intentional blanks.
+            if code_text.endswith("\r\n"):
+                code_text = code_text[:-2]
+            elif code_text.endswith("\n"):
+                code_text = code_text[:-1]
+            code = html.escape(code_text, quote=False)
+            if language:
+                return _protect(f'<pre><code class="language-{html.escape(language, quote=True)}">{code}</code></pre>', protected)
+            return _protect(f"<pre>{code}</pre>", protected)
 
-    text = fence_re.sub(fence, text)
+        if match.group("pre") is not None:
+            body = match.group("pre")
+            nested = re.fullmatch(
+                r'<code(?:\s+class="language-([A-Za-z0-9_+.-]+)")?\s*>(.*?)</code\s*>',
+                body, flags=re.IGNORECASE | re.DOTALL,
+            )
+            if nested:
+                language = nested.group(1)
+                escaped = html.escape(html.unescape(nested.group(2)), quote=False)
+                opening = f'<code class="language-{language}">' if language else "<code>"
+                return _protect(f"<pre>{opening}{escaped}</code></pre>", protected)
+            return _protect(f"<pre>{html.escape(html.unescape(body), quote=False)}</pre>", protected)
 
-    inline_re = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+        if match.group("html_code") is not None:
+            code = html.escape(html.unescape(match.group("html_code")), quote=False)
+            language = match.group("html_language")
+            opening = f'<code class="language-{language}">' if language else "<code>"
+            return _protect(f"{opening}{code}</code>", protected)
 
-    def inline(match: re.Match[str]) -> str:
-        code = html.escape(match.group(1), quote=False)
-        return _protect(f"<code>{code}</code>", protected)
+        return _protect(f"<code>{html.escape(match.group('inline'), quote=False)}</code>", protected)
 
-    return inline_re.sub(inline, text)
+    text = pattern.sub(protect, text)
+    # Four-space/tab-indented lines are copy-sensitive Markdown code, even if
+    # the model omitted fences. Keep their indentation and punctuation literal.
+    indented = re.compile(
+        r"(?m)(?:^(?:async\s+def|def|class|function)\s+[^\n\x00]+\n)?"
+        r"(?:^(?: {4}|\t)[^\n\x00]*(?:\n|$))+"
+    )
+    return indented.sub(lambda match: _protect(html.escape(match.group(0), quote=False), protected), text)
 
 
 def _sanitize_telegram_tag(raw: str) -> str | None:
@@ -156,8 +189,8 @@ def _apply_markdown(text: str) -> str:
 
 def render_telegram_html(text: str) -> str:
     """Render Aura's supported formatting subset into safe Telegram HTML."""
-    text = str(text or "").strip()
-    if not text:
+    text = str(text or "")
+    if not text.strip():
         return ""
 
     protected: list[str] = []
@@ -165,18 +198,41 @@ def render_telegram_html(text: str) -> str:
     text = _protect_existing_html(text, protected)
     text = html.escape(text, quote=False)
     text = _apply_markdown(text)
-    return _restore(text, protected).strip()
+    return _restore(text, protected)
 
 
 def strip_formatting(text: str) -> str:
-    """Return readable plain text for Telegram fallback after HTML parse failure."""
+    """Return plain text after a Telegram HTML failure without corrupting code."""
     text = str(text or "")
-    text = re.sub(r"```(?:[A-Za-z0-9_+.-]+)?\n?", "", text)
-    text = text.replace("```", "").replace("**", "").replace("__", "").replace("~~", "")
-    text = text.replace("`", "")
-    text = re.sub(r"(?m)^\s*>\s?", "", text)
+    protected: list[str] = []
+
+    def html_code(match: re.Match[str]) -> str:
+        value = re.sub(r"</?(?:pre|code)(?:\s+[^>]*)?>", "", match.group(0), flags=re.IGNORECASE)
+        return _protect(html.unescape(value), protected)
+
+    # send_long_message passes rendered HTML here; protect its code bodies
+    # before stripping emphasis markers such as __ or ** from the surrounding text.
+    text = re.sub(r"<pre(?:\s+[^>]*)?>.*?</pre>|<code(?:\s+[^>]*)?>.*?</code>", html_code, text, flags=re.I | re.S)
+
+    def fenced_code(match: re.Match[str]) -> str:
+        code = match.group(1)
+        if code.endswith("\r\n"):
+            code = code[:-2]
+        elif code.endswith("\n"):
+            code = code[:-1]
+        return _protect(code, protected)
+
+    text = re.sub(r"```(?:[A-Za-z0-9_+.-]+)?\r?\n?(.*?)```", fenced_code, text, flags=re.S)
+    text = re.sub(r"(?<!`)`([^`\n]+)`(?!`)", lambda match: _protect(match.group(1), protected), text)
+    text = re.sub(
+        r"(?m)(?:^(?:async\s+def|def|class|function)\s+[^\n\x00]+\n)?"
+        r"(?:^(?: {4}|\t)[^\n\x00]*(?:\n|$))+",
+        lambda match: _protect(match.group(0), protected), text,
+    )
+    text = text.replace("**", "").replace("__", "").replace("~~", "")
+    text = re.sub(r"(?m)^[ \t]*>[ \t]?", "", text)
     text = re.sub(r"<[^>]+>", "", text)
-    return html.unescape(text).strip()
+    return _restore(html.unescape(text), protected)
 
 
 def split_telegram_html(text: str, limit: int = 4000) -> list[str]:

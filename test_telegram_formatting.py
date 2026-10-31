@@ -21,6 +21,28 @@ def test_code_block_is_protected_and_language_is_kept():
     assert result.endswith("تمام")
 
 
+def test_code_preserves_indentation_array_and_intentional_blank_lines():
+    result = render_telegram_html("```python\n\n    return [1]\n\n\n```")
+    assert result == '<pre><code class="language-python">\n    return [1]\n\n</code></pre>'
+
+
+def test_unfenced_indentation_and_fallback_code_are_preserved():
+    code = "    def __init__():\n        return [1]"
+    assert render_telegram_html(code) == code
+    assert strip_formatting(code) == code
+    unindented_header = "def __init__():\n    return [1]"
+    assert render_telegram_html(unindented_header) == unindented_header
+    assert strip_formatting(unindented_header) == unindented_header
+    assert strip_formatting('<pre><code class="language-python">def __init__():\n    return [1]</code></pre>') == "def __init__():\n    return [1]"
+
+
+def test_existing_html_code_and_nested_backticks_are_literal():
+    source = '<pre><code>def __init__():\n    return "`a__b`", [1]</code></pre>'
+    assert render_telegram_html(source) == source
+    fenced = "```text\n<pre>**literal** [1]</pre>\n```"
+    assert render_telegram_html(fenced) == '<pre><code class="language-text">&lt;pre&gt;**literal** [1]&lt;/pre&gt;</code></pre>'
+
+
 def test_quote_block():
     result = render_telegram_html("> این یک نقل‌قول است\n> خط دوم")
     assert result == "<blockquote>این یک نقل‌قول است\nخط دوم</blockquote>"

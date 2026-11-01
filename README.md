@@ -303,6 +303,8 @@ timezone changes.
 
 ```text
 ۱۰ دقیقه دیگه یادم بنداز آب بخورم
+دو دقیقه دیگه یادم بنداز آب بخورم
+پنج دقیقع دیگه یادم بیار فلان کارو بکنم
 یادم بنداز فردا ساعت ۹:۳۰ قرص بخورم
 /remind in 10m آب بخورم
 /remind 2030-11-01 09:30 جلسه
@@ -311,13 +313,35 @@ timezone changes.
 /timezone Europe/Berlin
 ```
 
-Explicit dates use the **Gregorian calendar** and 24-hour time. Natural-language
-parsing is intentionally conservative: if the time or task is unclear, Aura
-asks for the supported format instead of claiming to have scheduled it. Repeat
-schedules are not supported. Nonexistent or repeated local times at daylight
-saving transitions are rejected; an explicit UTC offset, e.g.
+Explicit dates use the **Gregorian calendar** and 24-hour time. Persian written
+numbers and common informal variants (including `یه ربع`, `نیم ساعت` and
+`دقیقع`) are supported. Parsing remains conservative: if the time or task is
+unclear, Aura asks instead of claiming a reminder was created. If only the time
+is missing, a short follow-up such as `دو دقیقه دیگه` completes the same
+request. These incomplete conversations are scoped to the same user and chat,
+expire after ten minutes, and are cleared by `/new` or a restart; they are not
+registered reminders. After a change of topic, repeat the complete request
+rather than relying on an ambiguous follow-up. A short `لغوش کن` can cancel
+the most recently referenced reminder in that same user/chat context; when the
+target is unclear, use its ID with `/cancelreminder`.
+
+Aura also has a real reminder tool for less formulaic requests. It must quote
+the user's own task and time, and the application validates them and commits to
+SQLite before reporting success. Check `/reminders` for authoritative status.
+Repeating schedules are not supported. Nonexistent or repeated local times at
+daylight saving transitions are rejected; an explicit UTC offset, e.g.
 `2030-10-27 02:30+02:00`, disambiguates them. At most 100 pending reminders are
 allowed per user.
+
+After a successful commit, Gemini can phrase a natural confirmation. At the
+due time it can also generate a short message tailored to the saved task; the
+exact task is retained in the delivery as a factual backstop. These are extra
+model calls. If generation fails or times out, Aura uses a plain fallback so the
+reminder can still be delivered. In an allowed group the application creates a
+Telegram text mention from the stored requester ID and an escaped display-name
+snapshot, never an ID chosen by the model. If Telegram rejects the mention, it
+tries a plain-text delivery instead. Older reminders are migrated automatically
+and use a generic label if no display name was stored.
 
 A background worker resumes overdue reminders when the bot starts. It retries
 transient Telegram failures; permanent failures appear in `/reminders`, where

@@ -164,6 +164,8 @@ _FILLER_TOKENS: frozenset[str] = frozenset({
     "دیدم", "دیدی", "دیده", "برو", "بریم", "بروید", "بیا", "بیای", "آمد", "آمدم",
     "میرم", "میره", "میری", "میام", "میای", "بگیر", "بگیرم", "میتونی", "میتونم",
     "نمیدونم", "میدونی", "نمیدونی", "فکر", "لازم", "نیاز", "خوابم", "حالت", "خوبی",
+    # Recalling something from the conversation is not a web-search subject.
+    "یادم", "یادت", "بیار", "بیاور",
     "have", "know", "want", "need", "like", "love", "think", "got", "feel", "going",
     "wanna", "gonna", "thing", "stuff", "really", "very", "much", "soon", "maybe",
     "the", "and", "for", "are", "was", "were", "has", "have", "had", "not", "but", "you",

@@ -36,7 +36,7 @@ def test_missing_time_followup_actually_creates_the_reminder(isolated_bot):
     asyncio.run(bot.message_handler(second, context))
     rows = bot.reminder_store.list_active(123, 123)
     assert len(rows) == 1 and rows[0]["text"] == "آب بخورم"
-    assert "ثبت شد" in second.message.reply_text.await_args.args[0]
+    assert second.message.reply_text.await_args.args[0] == "حتماً، دو دقیقه دیگه آب خوردن رو یادت میارم 💧"
 
 
 def test_due_message_uses_ai_and_tags_original_group_member(isolated_bot):
@@ -103,7 +103,7 @@ def test_task_followup_and_greetings_do_not_create_unintended_reminders(isolated
     reply = _send(bot, "دارو بخورم")
     rows = bot.reminder_store.list_active(123, 123)
     assert len(rows) == 1 and rows[0]["text"] == "دارو بخورم"
-    assert "ثبت شد" in reply.message.reply_text.await_args.args[0]
+    assert reply.message.reply_text.await_args.args[0] == "باشه، یادت میارم داروت رو بخوری."
 
 
 def test_followup_is_scoped_to_same_user_and_chat(isolated_bot):
@@ -201,8 +201,7 @@ def test_model_outage_after_commit_uses_honest_confirmation_and_due_fallback(iso
     client.models.responses = [RuntimeError("Gemini down"), RuntimeError("Gemini still down")]
     update = _send(bot, "دو دقیقه دیگه یادم بنداز آب بخورم")
     row = bot.reminder_store.list_active(123, 123)[0]
-    assert f"#{row['id']}" in update.message.reply_text.await_args.args[0]
-    assert "ثبت شد" in update.message.reply_text.await_args.args[0]
+    assert update.message.reply_text.await_args.args[0] == "باشه، یادت می‌ندازم."
     bot.reminder_store.clock = lambda: row["due_utc"] + 1
     fake_tg = SimpleNamespace(send_message=AsyncMock())
     worker = bot.ReminderScheduler(bot.reminder_store, fake_tg, compose_message=lambda r: bot._natural_reminder_phrase(r, "delivery"))
@@ -232,7 +231,7 @@ def test_general_agent_has_a_real_grounded_reminder_tool(isolated_bot):
     rows = bot.reminder_store.list_active(123, 123)
     assert len(rows) == 1 and rows[0]["text"] == "قرص بخورم"
     assert not bot.reminder_store.list_active(999, 123)
-    assert "ثبت شد" in update.message.reply_text.await_args.args[0]
+    assert update.message.reply_text.await_args.args[0] == "حتماً، خوردن قرص رو یادت میارم."
     tool_names = {d.name for t in client.models.requests[0][2].tools for d in t.function_declarations}
     assert "schedule_reminder" in tool_names
 
@@ -250,7 +249,7 @@ def test_model_can_distinguish_scheduling_time_from_duration_in_task(isolated_bo
     rows = bot.reminder_store.list_active(123, 123)
     assert len(rows) == 1 and rows[0]["text"] == "دو ساعت ورزش کنم"
     assert rows[0]["due_utc"] == clock[0] + 300
-    assert "ثبت شد" in update.message.reply_text.await_args.args[0]
+    assert update.message.reply_text.await_args.args[0] == "باشه، یادت می‌ندازم."
     cfg = client.models.requests[0][2]
     assert cfg.tool_config.function_calling_config.allowed_function_names == ["schedule_reminder"]
 
@@ -299,7 +298,7 @@ def test_recipient_and_task_are_escaped_and_model_uses_real_task(isolated_bot):
     text = tg.send_message.await_args.kwargs["text"]
     assert 'tg://user?id=123' in text
     assert "A&lt;&amp;&quot;" in text
-    assert "&lt;b&gt;کار رو انجام بدی&lt;/b&gt;" in text
+    assert "&lt;b&gt;" not in text  # unrelated model wording falls back to the saved task
     assert "&lt;script&gt; &amp; دارو" in text
     assert '<script>' not in text
     assert '"phase": "delivery"' in client.models.requests[1][1][0].parts[0].text
@@ -347,7 +346,7 @@ def test_confirmation_comes_after_the_commit(isolated_bot, monkeypatch):
         return _text_response("چشم، آب خوردن رو یادت میارم.")
     monkeypatch.setattr(client.models, "generate_content", generate_content)
     response = _send(bot, "دو دقیقه دیگه یادم بنداز آب بخورم")
-    assert "ثبت شد" in response.message.reply_text.await_args.args[0]
+    assert response.message.reply_text.await_args.args[0] == "چشم، آب خوردن رو یادت میارم."
 
 
 @pytest.mark.parametrize("text", [
@@ -434,7 +433,7 @@ def test_contradictory_model_wording_is_not_used_for_committed_confirmation(isol
     reply = _send(bot, "دو دقیقه دیگه یادم بنداز آب بخورم")
     text = reply.message.reply_text.await_args.args[0]
     assert "ثبت نشده" not in text
-    assert "ثبت شد" in text
+    assert text == "باشه، یادت می‌ندازم."
     assert len(bot.reminder_store.list_active(123, 123)) == 1
 
 
@@ -461,7 +460,7 @@ def test_model_tool_followup_missing_time_is_grounded_and_persisted(isolated_bot
     reply = _send(bot, "دو دقیقه")
     rows = bot.reminder_store.list_active(123, 123)
     assert len(rows) == 1 and rows[0]["text"] == "آب بخورم"
-    assert "ثبت شد" in reply.message.reply_text.await_args.args[0]
+    assert reply.message.reply_text.await_args.args[0] == "حتماً، آب خوردن رو یادت میارم."
 
 
 def test_gemini_failure_and_transient_telegram_failure_do_not_lose_delivery(isolated_bot):
@@ -532,7 +531,7 @@ def test_confirmation_rejects_a_hallucinated_different_time(isolated_bot):
     reply = _send(bot, "دو دقیقه دیگه یادم بنداز آب بخورم")
     text = reply.message.reply_text.await_args.args[0]
     assert "ده دقیقه" not in text
-    assert "ثبت شد" in text
+    assert text == "باشه، یادت می‌ندازم."
     assert bot.reminder_store.list_active(123, 123)[0]["text"] == "آب بخورم"
 
 

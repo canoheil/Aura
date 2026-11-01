@@ -472,3 +472,8 @@ def test_forcing_is_skipped_when_search_tool_is_absent():
     ns = _agent_namespace(client=client, registry=registry, runner=_FakeRunner())
     ns["ask_gemini"]("test-model", [{"role": "user", "content": "قیمت طلا"}], require_web_search=True)
     assert all(_forced(config) is None for config in client.models.configs)
+
+
+def test_personal_identity_recall_is_not_a_forced_web_query():
+    assert not fp.classify("یادم بیار تو کی هستی").should_force
+    assert fp.classify("یادم بیار قیمت دلار چنده").should_force

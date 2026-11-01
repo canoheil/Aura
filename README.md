@@ -333,12 +333,16 @@ daylight saving transitions are rejected; an explicit UTC offset, e.g.
 `2030-10-27 02:30+02:00`, disambiguates them. At most 100 pending reminders are
 allowed per user.
 
-After a successful commit, Gemini can phrase a natural confirmation. At the
-due time it can also generate a short message tailored to the saved task; the
-exact task is retained in the delivery as a factual backstop. These are extra
-model calls. If generation fails or times out, Aura uses a plain fallback so the
-reminder can still be delivered. In an allowed group the application creates a
-Telegram text mention from the stored requester ID and an escaped display-name
+After a successful commit, Gemini can phrase a short confirmation using Aura's
+normal personality and verified identity context. At the due time it can also
+generate a brief, task-specific reminder. Confirmations and deliveries do not
+automatically add the timestamp, timezone, ID, or a second copy of the task;
+those details remain available through `/reminders`. These are extra model
+calls. A conservative wording check rejects obvious changes or omissions of
+task details; it is not a semantic guarantee. If generation fails, times out,
+or does not pass that check, Aura uses a short fallback with the saved task so
+the reminder can still be delivered. In an allowed group the application creates
+a Telegram text mention from the stored requester ID and an escaped display-name
 snapshot, never an ID chosen by the model. If Telegram rejects the mention, it
 tries a plain-text delivery instead. Older reminders are migrated automatically
 and use a generic label if no display name was stored.

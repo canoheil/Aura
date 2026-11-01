@@ -212,3 +212,119 @@ def test_cancelled_send_is_requeued(store):
         await asyncio.gather(task, return_exceptions=True)
         assert s.list_active(1, 2)[0]["status"] == "pending"
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("text,seconds", [
+    ("یه دقیقه دیگه یادم بیاری آب بخورم", 60),
+    ("نیم ساعت دیگه یادم بنداز آب بخورم", 1800),
+    ("یه ربع دیگه یادم بنداز آب بخورم", 900),
+    ("صد و بیست و پنج ثانیه دیگه یادم بنداز آب بخورم", 125),
+])
+def test_more_spoken_time_forms(text, seconds):
+    spec = parse_reminder(text, "Asia/Tehran", now=NOW, natural=True)
+    assert spec.due_utc == NOW + timedelta(seconds=seconds)
+    assert spec.text == "آب بخورم"
+
+
+@pytest.mark.parametrize("text", [
+    "منفی -۵ دقیقه دیگه یادم بنداز آب بخورم",
+    "۱.۵ ساعت دیگه یادم بنداز آب بخورم",
+    "تقریباً پنج دقیقه دیگه یادم بنداز آب بخورم",
+    "پنج یا ده دقیقه دیگه یادم بنداز آب بخورم",
+    "دو ساعت و سی دقیقه دیگه یادم بنداز آب بخورم",
+])
+def test_ambiguous_durations_are_not_silently_guessed(text):
+    from reminders import ambiguous_reminder_source
+    with pytest.raises(ReminderError):
+        parse_reminder(text, "Asia/Tehran", now=NOW, natural=True)
+    assert ambiguous_reminder_source(text)
+
+
+def test_time_quote_must_not_be_a_substring_of_another_number():
+    from reminders import reminder_source_contains
+    assert reminder_source_contains("۱۵ دقیقه دیگه یادم بنداز", "15 دقیقه دیگه")
+    assert not reminder_source_contains("۱۵ دقیقه دیگه یادم بنداز", "5 دقیقه دیگه")
+    assert not reminder_source_contains("-۵ دقیقه دیگه یادم بنداز", "5 دقیقه دیگه")
+    assert not reminder_source_contains("یادم بنداز گلاب بخرم", "آب بخرم")
+
+
+def test_preexisting_reminder_table_is_migrated_and_tagged(tmp_path):
+    db = sqlite3.connect(tmp_path / "legacy.db", check_same_thread=False)
+    db.execute("""CREATE TABLE reminders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+        text TEXT NOT NULL, due_utc INTEGER NOT NULL, timezone TEXT NOT NULL, created_at INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', next_attempt INTEGER NOT NULL, lease_until INTEGER NOT NULL DEFAULT 0,
+        claim_token TEXT, attempts INTEGER NOT NULL DEFAULT 0, delivered_at INTEGER, last_error TEXT NOT NULL DEFAULT ''
+    )""")
+    now = int(NOW.timestamp())
+    db.execute("""INSERT INTO reminders(chat_id,user_id,text,due_utc,timezone,created_at,status,next_attempt)
+                  VALUES(-100,123,'آب بخورم',?,'Asia/Tehran',?,'pending',?)""", (now - 1, now - 2, now - 1))
+    db.commit()
+    store = ReminderStore(db, threading.Lock(), clock=lambda: now)
+    fake = SimpleNamespace(send_message=AsyncMock())
+    asyncio.run(ReminderScheduler(store, fake).run_once())
+    sent = fake.send_message.await_args.kwargs
+    assert 'tg://user?id=123' in sent["text"]
+    assert "دوست من" in sent["text"]
+    assert not store.list_active(-100, 123)
+    db.close()
+
+
+def test_group_mention_rejection_delivers_plain_text_instead(store):
+    s, clock, _ = store
+    _create(s, chat=-100)
+    clock[0] += 11
+    fake = SimpleNamespace(send_message=AsyncMock(side_effect=[BadRequest("can't parse mention"), None]))
+    asyncio.run(ReminderScheduler(s, fake).run_once())
+    assert fake.send_message.await_count == 2
+    assert fake.send_message.await_args.kwargs["text"].endswith("آب بنوش")
+    assert "parse_mode" not in fake.send_message.await_args.kwargs
+    assert not s.list_active(-100, 2)
+
+
+def test_group_access_revoked_during_generation_is_rechecked(store):
+    s, clock, _ = store
+    _create(s, chat=-100)
+    clock[0] += 11
+    allowed = [True]
+    async def compose(_row):
+        allowed[0] = False
+        return "آب بنوش"
+    fake = SimpleNamespace(send_message=AsyncMock())
+    worker = ReminderScheduler(s, fake, can_send=lambda _: allowed[0], compose_message=compose)
+    asyncio.run(worker.run_once())
+    fake.send_message.assert_not_awaited()
+    assert s.list_active(-100, 2)[0]["last_error"] == "chat_not_allowed"
+
+
+def test_commit_failure_rolls_back_insert_before_other_db_work():
+    class FlakyCommitConnection(sqlite3.Connection):
+        fail_next_commit = False
+        def commit(self):
+            if self.fail_next_commit:
+                self.fail_next_commit = False
+                raise sqlite3.OperationalError("disk full at commit")
+            return super().commit()
+
+    db = sqlite3.connect(":memory:", factory=FlakyCommitConnection, check_same_thread=False)
+    store = ReminderStore(db, threading.Lock(), clock=lambda: NOW.timestamp())
+    db.fail_next_commit = True
+    with pytest.raises(sqlite3.OperationalError):
+        _create(store)
+    assert store.list_active(1, 2) == []
+    db.execute("INSERT INTO reminder_timezones VALUES (999, 'Asia/Tehran', 0)")
+    db.commit()  # unrelated future commit must not revive the failed row
+    assert store.list_active(1, 2) == []
+    db.close()
+
+
+def test_polite_reminder_question_does_not_become_part_of_the_task():
+    spec = parse_reminder("میشه بهم یادآوری کنی پنج دقیقه دیگه دارو بخورم", "Asia/Tehran", now=NOW, natural=True)
+    assert spec.text == "دارو بخورم"
+    assert spec.due_utc == NOW + timedelta(minutes=5)
+
+
+def test_persian_after_prefix_is_an_explicit_future_time():
+    spec = parse_reminder("بعد از دو دقیقه یادم بنداز آب بخورم", "Asia/Tehran", now=NOW, natural=True)
+    assert spec.due_utc == NOW + timedelta(minutes=2)
+    assert spec.text == "آب بخورم"

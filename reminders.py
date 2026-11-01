@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import html
 import logging
 import re
 import sqlite3
 import threading
 import time
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -27,8 +28,12 @@ MAX_TEXT_LENGTH = 500
 MAX_PENDING_PER_USER = 100
 MAX_FUTURE_SECONDS = 5 * 366 * 24 * 3600
 _DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+# Normalization is deliberately length-preserving: match spans must still point
+# at the original text, including Persian digits and zero-width joiners.
 _TRIGGER = re.compile(
-    r"(?:یادم\s*(?:بنداز|بینداز)|(?:به\s+من\s+)?یادآوری\s*(?:کن|بکن|بذار|بگذار|تنظیم\s*کن)|"
+    r"(?:یادم\s*(?:بندازی|بیندازی|بیاری|بیاوری|بنداز|بینداز|بیار|بیاور)(?!\w)|"
+    r"(?:(?:به\s+من|بهم)\s*)?یادآوری\s*(?:تنظیم\s*کنی|تنظیم\s*کن|بکنی|بکن|کنی|کن|بذاری|بذار|بگذاری|بگذار)(?!\w)|"
+    r"(?:یه\s+|یک\s+)?یادآور(?:ی)?\s*(?:تنظیم|ثبت|درست|ست)\s*(?:بکنی|بکن|کنی|کن)(?!\w)|"
     r"remind\s+me\b)", re.IGNORECASE,
 )
 _RECURRING = re.compile(r"(?:هر\s*(?:روز|هفته|ماه|ساعت)|روزانه|هفتگی|ماهانه|\bevery\b|\bdaily\b|\bweekly\b)", re.IGNORECASE)
@@ -41,15 +46,174 @@ _NAMED_DAY = re.compile(
     r"(?:فردا|امروز|tomorrow|today)\s*(?:(?:ساعت|at)\s*)?"
     r"(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?(?!\d)", re.IGNORECASE,
 )
+_WORD_VALUES = {
+    "یک": 1, "یه": 1, "يک": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5,
+    "شش": 6, "هفت": 7, "هشت": 8, "نه": 9, "ده": 10, "یازده": 11,
+    "دوازده": 12, "سیزده": 13, "چهارده": 14, "پانزده": 15, "پونزده": 15,
+    "شانزده": 16, "شونزده": 16, "هفده": 17, "هجده": 18, "نوزده": 19,
+    "بیست": 20, "سی": 30, "چهل": 40, "پنجاه": 50, "شصت": 60,
+    "هفتاد": 70, "هشتاد": 80, "نود": 90, "صد": 100, "یکصد": 100,
+    "دویست": 200, "سیصد": 300, "چهارصد": 400, "پانصد": 500,
+    "ششصد": 600, "هفتصد": 700, "هشتصد": 800, "نهصد": 900, "هزار": 1000,
+}
+_WORD_NUMBER = "(?:" + "|".join(sorted(_WORD_VALUES, key=len, reverse=True)) + ")"
 _RELATIVE = re.compile(
-    r"(?<!\w)(?P<prefix>in\s+|after\s+|در\s+|تا\s+)?(?P<count>\d{1,5})\s*"
-    r"(?P<unit>ثانیه|دقیقه|ساعت|روز|seconds?|minutes?|hours?|days?|s|m|h|d)"
+    rf"(?<![\w+\-−.,،٫٬/])(?P<prefix>in\s+|after\s+|بعد\s+از\s+|پس\s+از\s+|در\s+|تا\s+)?"
+    rf"(?P<count>\d{{1,5}}|نیم|{_WORD_NUMBER}(?:\s+و\s+{_WORD_NUMBER}){{0,3}})\s*"
+    r"(?P<unit>ثانیه|دقیقه|دقیقع|ساعت|روز|ربع|seconds?|minutes?|hours?|days?|s|m|h|d)"
     r"(?P<suffix>\s*(?:دیگه|دیگر|بعد|از\s+الان|later|from\s+now))?(?!\w)", re.IGNORECASE,
 )
 
 
 class ReminderError(ValueError):
-    """Validation failure with a safe user-facing explanation."""
+    """Validation failure with a safe user-facing explanation and category."""
+
+    def __init__(self, message: str, *, code: str = "invalid"):
+        super().__init__(message)
+        self.code = code
+
+
+def _normalized(text: str) -> str:
+    return str(text or "").translate(_DIGITS).replace("\u200c", " ").replace("ي", "ی").replace("ك", "ک")
+
+
+def _number_value(text: str) -> float:
+    if text.isdigit():
+        return int(text)
+    if text == "نیم":
+        return 0.5
+    words = re.split(r"\s+و\s+", text)
+    total, previous_rank = 0, 10_000
+    for word in words:
+        value = _WORD_VALUES.get(word)
+        if value is None:
+            raise ReminderError("عدد زمان یادآوری واضح نیست؛ لطفاً دوباره بگو.", code="ambiguous_time")
+        rank = 1000 if value >= 1000 else 100 if value >= 100 else 10 if value >= 10 else 1
+        if rank >= previous_rank:
+            raise ReminderError("عدد زمان یادآوری واضح نیست؛ لطفاً دوباره بگو.", code="ambiguous_time")
+        total += value
+        previous_rank = rank
+    return total
+
+
+def has_recurring_reminder(text: str) -> bool:
+    return bool(_RECURRING.search(_normalized(text)))
+
+
+def reminder_time_reply(text: str) -> Optional[str]:
+    """Return a bare clarification time, adding an implied 'later' if needed.
+
+    Only an entire time expression qualifies, so a pending question does not
+    accidentally turn an unrelated conversation into a reminder.
+    """
+    value = str(text or "").strip().strip(" \t\n،,؛.!؟?")
+    # Conversational wrappers are safe only when the remainder is exactly one
+    # time; do not consume an unrelated sentence mentioning a duration.
+    value = re.sub(r"^(?:(?:باشه|اوکی|همون|لطفا|لطفاً|به\s+نظرم)\s*[,،]?\s+)+", "", value, flags=re.I)
+    value = re.sub(r"\s+(?:خوبه|مناسبه|باشه)$", "", value, flags=re.I).strip()
+    normalized = _normalized(value)
+    match = _RELATIVE.fullmatch(normalized)
+    if match:
+        return value if match.group("prefix") or match.group("suffix") else value + " دیگه"
+    if _ABSOLUTE.fullmatch(normalized) or _NAMED_DAY.fullmatch(normalized):
+        return value
+    return None
+
+
+def reminder_source_contains(source: str, quote: str) -> bool:
+    """Match a whole user-supplied fragment, tolerating only orthography.
+
+    A substring is not enough: «5 دقیقه» is inside «15 دقیقه», but is not
+    what the person asked for. Do not accept a fragment inside a word/number.
+    """
+    def normalized(value: str) -> str:
+        return re.sub(r"\s+", " ", _normalized(value)).strip().casefold()
+    haystack, needle = normalized(source), normalized(quote)
+    if not needle:
+        return False
+    for match in re.finditer(re.escape(needle), haystack):
+        before = haystack[match.start() - 1] if match.start() else ""
+        after = haystack[match.end()] if match.end() < len(haystack) else ""
+        if before and (before.isalnum() or before in "_+-−.,،٫٬/") and needle[0].isalnum():
+            continue
+        if after and (after.isalnum() or after == "_") and needle[-1].isalnum():
+            continue
+        return True
+    return False
+
+
+_UNSAFE_NUMBER = re.compile(
+    r"(?<!\w)(?:[-−+]\s*\d|\d+[.,،٫]\d+)\s*"
+    r"(?:ثانیه|دقیقه|دقیقع|ساعت|روز|seconds?|minutes?|hours?|days?)", re.I,
+)
+
+
+def explicit_reminder_time_phrases(text: str) -> list[str]:
+    """Extract explicit time phrases for checking generated wording, not actions."""
+    original, value = str(text or ""), _normalized(text)
+    matches = list(_ABSOLUTE.finditer(value)) + list(_NAMED_DAY.finditer(value))
+    matches += [m for m in _RELATIVE.finditer(value) if m.group("prefix") or m.group("suffix")]
+    return [original[m.start():m.end()] for m in matches]
+
+
+def explicit_reminder_time_count(text: str) -> int:
+    value = _normalized(text)
+    return (len(list(_ABSOLUTE.finditer(value))) + len(list(_NAMED_DAY.finditer(value)))
+            + sum(bool(m.group("prefix") or m.group("suffix")) for m in _RELATIVE.finditer(value)))
+
+
+def ambiguous_reminder_source(text: str) -> bool:
+    """Reject competing explicit times and approximate/alternative durations."""
+    value = _normalized(text)
+    relative = list(_RELATIVE.finditer(value))
+    if _UNSAFE_NUMBER.search(value) or explicit_reminder_time_count(value) > 1:
+        return True
+    # «دو ساعت و سی دقیقه دیگه» is one compound duration, not 30
+    # minutes or two independent reminders. Ask rather than choosing half.
+    for first, second in zip(relative, relative[1:]):
+        between = value[first.end():second.start()]
+        if re.fullmatch(r"\s*(?:و|and)\s*", between, re.I):
+            return True
+    for match in relative:
+        try:
+            _number_value(match.group("count"))
+        except ReminderError:
+            return True
+        before = value[:match.start()].rstrip()
+        if re.search(rf"(?<!\w)(?:{_WORD_NUMBER}|یا|حدود|تقریبا|تقریباً|شاید)\s*$", before):
+            return True
+    return False
+
+
+def grounded_reminder_task(sources: list[str], when: str) -> Optional[str]:
+    """For a recognized trigger, recover the *entire* task, not an LLM fragment.
+
+    Use only length-preserving normalization to retain the user's literal
+    wording. If the quoted time cannot be located exactly, do not guess.
+    """
+    combined = " ".join(sources).strip()
+    normalized, needle = _normalized(combined), _normalized(when).strip()
+    trigger = _TRIGGER.search(normalized)
+    if not trigger:
+        return None
+    start = normalized.find(needle)
+    if not needle or start < 0:
+        raise ReminderError("زمان و متن یادآوری را دقیق‌تر بگو؛ چیزی ثبت نکردم.", code="ambiguous_time")
+    return _message_without_spans(combined, [trigger.span(), (start, start + len(needle))])
+
+
+def parse_reminder_time_expression(text: str, zone_name: str, *, now: Optional[datetime] = None,
+                                   allow_implicit_relative: bool = False) -> datetime:
+    """Validate a quoted time on its own, without misreading durations in a task."""
+    value = str(text or "").strip()
+    if allow_implicit_relative:
+        value = reminder_time_reply(value) or value
+    marker = "__aura_reminder_task__"
+    spec = parse_reminder(f"یادم بنداز {value} {marker}", zone_name, now=now, natural=True)
+    if spec.text != marker:
+        raise ReminderError("زمان را واضح‌تر بگو؛ چیزی ثبت نکردم.", code="ambiguous_time")
+    return spec.due_utc
+
 
 
 @dataclass(frozen=True)
@@ -70,8 +234,26 @@ def timezone_for(name: str) -> ZoneInfo:
 
 
 def is_reminder_request(text: str) -> bool:
-    normalized = str(text or "").translate(_DIGITS).replace("\u200c", " ")
-    return bool(_TRIGGER.search(normalized))
+    value = _normalized(text)
+    match = _TRIGGER.search(value)
+    if not match:
+        return False
+    before = value[:match.start()]
+    # A quoted example, translation, negation or hypothetical is not an
+    # instruction to create a real reminder. Polite «اگه میشه» is different.
+    if (before.count("«") > before.count("»") or before.count('"') % 2
+            or re.search(r"(?:ترجمه|معنی|معنای|مثال|داستان|نقل قول|نمی\s*خوام|"
+                         r"نمی\s*خواهم|(?:اگه|اگر)(?!\s*(?:میشه|می\s*شه|امکانش|می\s*تونی))|"
+                         r"\b(?:translate|example|fiction|do not|don't)\b)", before, re.I)):
+        return False
+    # «یادم بیار اسمم چیه؟» is a request to recall information, not a
+    # request for a future notification. Explicit time changes that meaning.
+    after = value[match.end():]
+    has_time = bool(_ABSOLUTE.search(value) or _NAMED_DAY.search(value)
+                    or any(m.group("prefix") or m.group("suffix") for m in _RELATIVE.finditer(value)))
+    if not has_time and re.search(r"(?:چیه|چیست|چی بود|چه بود|کی بود|اسمم چیه|\bwhat\b)", after, re.I):
+        return False
+    return True
 
 
 def _local_to_utc(local: datetime, zone: ZoneInfo) -> datetime:
@@ -96,7 +278,7 @@ def _message_without_spans(original: str, spans: list[tuple[int, int]]) -> str:
     text = "".join(chars)
     text = re.sub(r"\s+", " ", text).strip(" \t\n،,:؛-–")
     # These are conversational glue only at the boundary, never inside the task.
-    text = re.sub(r"^(?:لطفا|لطفاً|که|تا|برای\s+من|please)\s+", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"^(?:(?:اگه\s*)?(?:میشه|می\s*شه)|می\s*تونی|لطفا|لطفاً|که|تا|برای\s+من|please)\s+", "", text, flags=re.IGNORECASE).strip()
     return text
 
 
@@ -108,7 +290,7 @@ def parse_reminder(text: str, zone_name: str, *, now: Optional[datetime] = None,
     when (e.g. «۱۰ دقیقه دیگه»); unsupported or ambiguous input is rejected.
     """
     original = str(text or "").strip()
-    normalized = original.translate(_DIGITS).replace("\u200c", " ")
+    normalized = _normalized(original)
     zone = timezone_for(zone_name)
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -116,9 +298,11 @@ def parse_reminder(text: str, zone_name: str, *, now: Optional[datetime] = None,
     current = current.astimezone(timezone.utc)
     trigger = _TRIGGER.search(normalized)
     if natural and not trigger:
-        raise ReminderError("درخواست یادآوری مشخص نیست.")
+        raise ReminderError("درخواست یادآوری مشخص نیست.", code="missing_intent")
     if _RECURRING.search(normalized):
-        raise ReminderError("یادآور تکراری فعلاً پشتیبانی نمی‌شود؛ می‌توانی یک یادآور یک‌باره ثبت کنی.")
+        raise ReminderError("یادآور تکراری فعلاً پشتیبانی نمی‌شود؛ می‌توانی یک یادآور یک‌باره ثبت کنی.", code="recurring")
+    if _UNSAFE_NUMBER.search(normalized):
+        raise ReminderError("زمان را با عدد مثبت و واضح بگو؛ هنوز چیزی ثبت نکردم.", code="ambiguous_time")
 
     matches = [("absolute", m) for m in _ABSOLUTE.finditer(normalized)]
     matches += [("day", m) for m in _NAMED_DAY.finditer(normalized)]
@@ -126,21 +310,29 @@ def parse_reminder(text: str, zone_name: str, *, now: Optional[datetime] = None,
     if len(matches) != 1:
         raise ReminderError(
             "زمان یادآوری را دقیق بگو؛ مثلاً «۱۰ دقیقه دیگه یادم بنداز آب بخورم» "
-            "یا /remind 2026-11-01 09:30 آب بخورم (تاریخ میلادی)."
+            "یا /remind 2026-11-01 09:30 آب بخورم (تاریخ میلادی).",
+            code="missing_time" if not matches else "ambiguous_time",
         )
     kind, match = matches[0]
     try:
         if kind == "relative":
             if natural and not (match.group("prefix") or match.group("suffix")):
-                raise ReminderError("بگو چند دقیقه یا ساعت دیگر؛ مثلاً «۱۰ دقیقه دیگه یادم بنداز آب بخورم».")
-            count = int(match.group("count"))
+                raise ReminderError("بگو چند دقیقه یا ساعت دیگر؛ مثلاً «۱۰ دقیقه دیگه یادم بنداز آب بخورم».", code="missing_time")
+            count = _number_value(match.group("count"))
+            # Do not silently choose the final number of an approximate or
+            # malformed expression like «یکی دو دقیقه» or «پنج یا ده دقیقه».
+            before = normalized[:match.start()].rstrip()
+            if re.search(rf"(?<!\w)(?:{_WORD_NUMBER}|یا|حدود|تقریبا|تقریباً)\s*$", before):
+                raise ReminderError("زمان تقریبی یا چندگزینه‌ای است؛ زمان دقیق را بگو.", code="ambiguous_time")
             unit = match.group("unit").lower()
             if unit in {"s", "second", "seconds", "ثانیه"}:
                 seconds = count
-            elif unit in {"m", "minute", "minutes", "دقیقه"}:
+            elif unit in {"m", "minute", "minutes", "دقیقه", "دقیقع"}:
                 seconds = count * 60
             elif unit in {"h", "hour", "hours", "ساعت"}:
                 seconds = count * 3600
+            elif unit == "ربع":
+                seconds = count * 900
             else:
                 seconds = count * 86400
             due = current + timedelta(seconds=seconds)
@@ -180,7 +372,7 @@ def parse_reminder(text: str, zone_name: str, *, now: Optional[datetime] = None,
         spans.append(trigger.span())
     content = _message_without_spans(original, spans)
     if not content:
-        raise ReminderError("چه چیزی را یادآوری کنم؟ متن یادآوری را هم بفرست.")
+        raise ReminderError("چه چیزی را یادآوری کنم؟ متن یادآوری را هم بفرست.", code="missing_task")
     if len(content) > MAX_TEXT_LENGTH:
         raise ReminderError(f"متن یادآوری خیلی طولانی است؛ حداکثر {MAX_TEXT_LENGTH} کاراکتر.")
     return ReminderSpec(due_utc=due, text=content, timezone=zone.key)
@@ -210,8 +402,14 @@ class ReminderStore:
                 due_utc INTEGER NOT NULL, timezone TEXT NOT NULL, created_at INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending', next_attempt INTEGER NOT NULL,
                 lease_until INTEGER NOT NULL DEFAULT 0, claim_token TEXT,
-                attempts INTEGER NOT NULL DEFAULT 0, delivered_at INTEGER, last_error TEXT NOT NULL DEFAULT ''
+                attempts INTEGER NOT NULL DEFAULT 0, delivered_at INTEGER, last_error TEXT NOT NULL DEFAULT '',
+                recipient_name TEXT NOT NULL DEFAULT ''
             )""")
+            # Existing reminders keep their IDs/statuses and get a safe generic
+            # display name; the verified Telegram user_id was already stored.
+            columns = {row["name"] for row in self.db.execute("PRAGMA table_info(reminders)").fetchall()}
+            if "recipient_name" not in columns:
+                self.db.execute("ALTER TABLE reminders ADD COLUMN recipient_name TEXT NOT NULL DEFAULT ''")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, next_attempt, due_utc)")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_reminders_owner ON reminders(user_id, chat_id, status)")
             self.db.commit()
@@ -230,7 +428,7 @@ class ReminderStore:
             self.db.commit()
         return zone
 
-    def create(self, chat_id: int, user_id: int, spec: ReminderSpec) -> int:
+    def create(self, chat_id: int, user_id: int, spec: ReminderSpec, *, recipient_name: str = "") -> int:
         now = int(self.clock())
         if spec.due_utc.tzinfo is None or spec.due_utc.utcoffset() is None:
             raise ReminderError("زمان یادآوری باید منطقهٔ زمانی مشخص داشته باشد.")
@@ -241,17 +439,34 @@ class ReminderStore:
         text = str(spec.text or "").strip()
         if not text or len(text) > MAX_TEXT_LENGTH:
             raise ReminderError("متن یادآوری خالی یا بیش از حد طولانی است.")
+        # A display name is only a label, never an authority for the mention.
+        # Strip controls and bound it; Telegram IDs always come from the update.
+        name = re.sub(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", " ", str(recipient_name or ""))
+        name = re.sub(r"\s+", " ", name).strip()[:80]
         with self.lock:
-            count = self.db.execute(
-                "SELECT COUNT(*) AS n FROM reminders WHERE user_id=? AND status IN ('pending', 'sending')", (user_id,),
-            ).fetchone()["n"]
-            if count >= MAX_PENDING_PER_USER:
-                raise ReminderError("تعداد یادآورهای فعال به سقف مجاز رسیده است؛ یکی را لغو کن.")
-            cur = self.db.execute("""INSERT INTO reminders
-                (chat_id, user_id, text, due_utc, timezone, created_at, status, next_attempt)
-                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""", (chat_id, user_id, text, due, spec.timezone, now, due))
-            self.db.commit()
-            return int(cur.lastrowid)
+            try:
+                count = self.db.execute(
+                    "SELECT COUNT(*) AS n FROM reminders WHERE user_id=? AND status IN ('pending', 'sending')", (user_id,),
+                ).fetchone()["n"]
+                if count >= MAX_PENDING_PER_USER:
+                    raise ReminderError("تعداد یادآورهای فعال به سقف مجاز رسیده است؛ یکی را لغو کن.")
+                cur = self.db.execute("""INSERT INTO reminders
+                    (chat_id, user_id, text, due_utc, timezone, created_at, status, next_attempt, recipient_name)
+                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                    (chat_id, user_id, text, due, spec.timezone, now, due, name))
+                self.db.commit()
+                return int(cur.lastrowid)
+            except Exception:
+                # A failed commit must not leave an uncommitted row that some
+                # unrelated later operation could accidentally commit.
+                self.db.rollback()
+                raise
+
+    def get_owned(self, chat_id: int, user_id: int, reminder_id: int) -> Optional[dict]:
+        with self.lock:
+            row = self.db.execute("SELECT * FROM reminders WHERE id=? AND chat_id=? AND user_id=?",
+                                  (reminder_id, chat_id, user_id)).fetchone()
+        return dict(row) if row else None
 
     def list_active(self, chat_id: int, user_id: int) -> list[dict]:
         with self.lock:
@@ -326,11 +541,31 @@ class ReminderStore:
 
 class ReminderScheduler:
     def __init__(self, store: ReminderStore, bot, *, poll_seconds: float = 3.0,
-                 can_send: Optional[Callable[[int], bool]] = None):
+                 can_send: Optional[Callable[[int], bool]] = None,
+                 compose_message: Optional[Callable[[dict], Awaitable[str]]] = None):
         self.store, self.bot = store, bot
         self.poll_seconds = max(1.0, min(60.0, float(poll_seconds)))
         self.can_send = can_send
+        self.compose_message = compose_message
         self.stop_event = asyncio.Event()
+
+    async def _message_text(self, row: dict) -> str:
+        task = str(row["text"])
+        if self.compose_message:
+            try:
+                result = await self.compose_message(row)
+                if isinstance(result, str) and 0 < len(result.strip()) <= 1000:
+                    result = result.strip()
+                    # The natural paraphrase may omit or change a detail. Keep
+                    # the user's exact saved task visible as a factual backstop.
+                    if task not in result:
+                        result += f"\n\nمتن یادآوری: {task}"
+                    return result
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Reminder composition failed | id=%s", row["id"], exc_info=True)
+        return f"⏰ وقتشه یادت بندازم: {task}"
 
     async def run_once(self) -> bool:
         row = self.store.claim_due()
@@ -340,7 +575,30 @@ class ReminderScheduler:
             if self.can_send and not self.can_send(row["chat_id"]):
                 self.store.retry(row, delay=300, error="chat_not_allowed")
                 return True
-            await self.bot.send_message(chat_id=row["chat_id"], text=f"⏰ یادآوری #{row['id']}:\n{row['text']}")
+            message = await self._message_text(row)
+            # Access may have been revoked while the model was composing.
+            if self.can_send and not self.can_send(row["chat_id"]):
+                self.store.retry(row, delay=300, error="chat_not_allowed")
+                return True
+            if row["chat_id"] < 0 and row["user_id"] > 0:
+                # Telegram's text-mention URL uses the authoritative stored ID.
+                # Escape *all* model and user text; neither can inject HTML or a
+                # mention for a different person. Pre-migration rows use a label.
+                raw_name = row.get("recipient_name") or "دوست من"
+                name = html.escape(raw_name)
+                mention = f'<a href="tg://user?id={int(row["user_id"])}">{name}</a>'
+                try:
+                    await self.bot.send_message(
+                        chat_id=row["chat_id"], text=f"{mention}، {html.escape(message)}", parse_mode="HTML",
+                    )
+                except BadRequest:
+                    # If Telegram rejects the text-mention entity, still try to
+                    # deliver the reminder literally. An invalid/inaccessible
+                    # chat will fail again and be recorded as permanently failed.
+                    logger.warning("Reminder mention rejected; trying plain text | id=%s", row["id"])
+                    await self.bot.send_message(chat_id=row["chat_id"], text=f"{raw_name}، {message}")
+            else:
+                await self.bot.send_message(chat_id=row["chat_id"], text=message)
         except asyncio.CancelledError:
             self.store.retry(row, delay=0, error="interrupted")
             raise

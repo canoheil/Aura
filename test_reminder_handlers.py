@@ -5,11 +5,12 @@ from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 from reminders import ReminderSpec
-from test_agent_tool_response import isolated_bot, _telegram_update
+from test_agent_tool_response import isolated_bot, _telegram_update, _text_response
 
 
 def test_natural_request_is_persisted_without_model_guessing(isolated_bot):
     bot, client = isolated_bot
+    client.models.responses = [_text_response("حتماً، آب خوردن رو یادت میارم 💧")]
     update, context, _ = _telegram_update()
     update.message.text = "۱۰ دقیقه دیگه یادم بنداز آب بخورم"
     asyncio.run(bot.message_handler(update, context))
@@ -18,7 +19,9 @@ def test_natural_request_is_persisted_without_model_guessing(isolated_bot):
     assert rows[0]["text"] == "آب بخورم"
     assert rows[0]["timezone"] == "Asia/Tehran"
     assert "ثبت شد" in update.message.reply_text.await_args.args[0]
-    assert client.models.requests == []
+    # The model only phrases the confirmation, after the actual row exists.
+    assert len(client.models.requests) == 1
+    assert '"phase": "confirmation"' in client.models.requests[0][1][0].parts[0].text
 
 
 def test_incomplete_natural_request_asks_instead_of_claiming_success(isolated_bot):

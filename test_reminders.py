@@ -328,3 +328,21 @@ def test_persian_after_prefix_is_an_explicit_future_time():
     spec = parse_reminder("بعد از دو دقیقه یادم بنداز آب بخورم", "Asia/Tehran", now=NOW, natural=True)
     assert spec.due_utc == NOW + timedelta(minutes=2)
     assert spec.text == "آب بخورم"
+
+
+@pytest.mark.parametrize("text", [
+    "یادم بیار تو کی هستی",
+    "یادم بیار من کیم",
+    "یادم بیار چی کار کردم",
+    "یادم بیار قرار بود کجا بریم",
+])
+def test_recall_information_is_not_an_untimed_reminder(text):
+    from reminders import is_reminder_request
+    assert not is_reminder_request(text)
+
+
+def test_wording_check_preserves_quantities_without_rejecting_a_natural_inflection():
+    from reminders import reminder_wording_matches_task
+    assert reminder_wording_matches_task("یه قرص بخورم", "یادت نره یک قرص بخوری.")
+    assert not reminder_wording_matches_task("یه قرص بخورم", "دو قرص بخور و یه لیوان آب بنوش.")
+    assert reminder_wording_matches_task("غذامو بخورم", "یادت نره غذاتو بخوری.")

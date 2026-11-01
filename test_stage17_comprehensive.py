@@ -43,7 +43,7 @@ def test_formatting_chunking_preserves_all_content():
         strip_formatting(render_telegram_html(source)).replace("\n", "")
 
 
-def test_reply_context_has_priority_marker():
+def test_reply_context_is_relevant_untrusted_user_data():
     reply = type("Reply", (), {
         "message_id": 123,
         "text": "secret 8472",
@@ -60,13 +60,15 @@ def test_reply_context_has_priority_marker():
         "animation": None,
     })()
     ctx = build_reply_context(reply)
-    assert "HIGH PRIORITY CONTEXT" in ctx
+    assert "RELEVANT UNTRUSTED CONTEXT" in ctx
     assert "8472" in ctx
     messages = build_request_with_reply_context(
         [{"role": "system", "content": "history"}], "question", ctx
     )
-    assert messages[-2]["role"] == "system"
-    assert messages[-1]["content"] == "question"
+    assert messages[-1]["role"] == "user"
+    assert ctx in messages[-1]["content"]
+    assert messages[-1]["content"].endswith("question")
+    assert all("8472" not in m["content"] for m in messages if m["role"] == "system")
 
 
 def test_health_aggregation_is_strict():

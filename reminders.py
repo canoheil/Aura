@@ -148,12 +148,106 @@ _UNSAFE_NUMBER = re.compile(
 )
 
 
-def explicit_reminder_time_phrases(text: str) -> list[str]:
-    """Extract explicit time phrases for checking generated wording, not actions."""
+def explicit_reminder_time_phrases(text: str, *, include_implicit: bool = False) -> list[str]:
+    """Extract time phrases for generated wording checks, never action parsing."""
     original, value = str(text or ""), _normalized(text)
     matches = list(_ABSOLUTE.finditer(value)) + list(_NAMED_DAY.finditer(value))
-    matches += [m for m in _RELATIVE.finditer(value) if m.group("prefix") or m.group("suffix")]
+    matches += [m for m in _RELATIVE.finditer(value) if include_implicit or m.group("prefix") or m.group("suffix")]
     return [original[m.start():m.end()] for m in matches]
+
+
+# A conservative lexical backstop for generated wording. It is not a semantic
+# verifier: when it cannot match the substantive words (including quantities),
+# we prefer the saved task in a single fallback sentence over a wrong paraphrase.
+_WORDING_GLUE = {
+    "و", "یا", "از", "به", "با", "در", "برای", "که", "را", "رو", "من", "تو", "شما",
+    "تا", "هم", "این", "اون", "می", "باید", "لطفا", "لطفاً", "کردن",
+    "کن", "کنم", "کنی", "کنه", "بکن", "بکنم", "بکنی", "کردم", "کردی", "کنید",
+    "برم", "بری", "بره", "برو", "رفتن", "باشم", "باشی", "بشم", "بشی", "بشه",
+}
+_CONFIRMATION_GLUE = _WORDING_GLUE | {
+    "باشه", "باش", "حتما", "حتماً", "اوکی", "چشم", "بله", "آره", "خیالت", "خیال",
+    "راحت", "نگران", "نباش", "یادت", "یادم", "یاد", "یادآوری", "یاداوری", "یادآورت",
+    "میارم", "میآرم", "میندازم", "میاندازم", "بیارم", "بندازم", "میگم", "میگویم",
+    "میکنم", "میدم", "میمونه", "می‌مونه", "میشم", "برات", "بهت", "بعد", "دیگه",
+    "وقتش", "موقعش", "زمانش", "زمان", "رسید", "رسیدنش", "شد", "انجام", "حله", "خبرت",
+    "می کنم", "می گم", "یادآور", "یادآوریه", "مطمئن", "میاد", "میشه", "حواسم", "هست",
+}
+
+
+def _wording_terms(text: str, *, confirmation: bool = False) -> list[str]:
+    value = _normalized(text).casefold()
+    value = re.sub(r"[\u064b-\u065f\u0670]", "", value)
+    glue = _CONFIRMATION_GLUE if confirmation else _WORDING_GLUE
+    terms: list[str] = []
+    for word in re.findall(r"[آ-ی]+|[a-z]+|\d+", value):
+        if word in glue:
+            continue
+        if word in _WORD_VALUES:
+            word = str(_WORD_VALUES[word])
+        elif word.startswith(("بخور", "خور")):
+            word = "خور"
+        elif word.startswith(("بنوش", "نوش")):
+            word = "نوش"
+        else:
+            for suffix in (
+                "هایی", "های", "تونو", "مونو", "شونو", "تون", "مون", "شون",
+                "مو", "تو", "شو", "ها", "یم", "ید", "م", "ی",
+            ):
+                if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+                    word = word[:-len(suffix)]
+                    break
+        if len(word) >= 2 or word.isdigit():
+            terms.append(word)
+    return terms
+
+
+def _has_negated_task_action(text: str) -> bool:
+    value = _normalized(text).casefold()
+    # These phrases mean "remember", not "do not perform the saved action".
+    value = re.sub(r"(?:یادت|یادم)\s*(?:نره|نرفته|نرود|نمی\s*ره)", " ", value)
+    return bool(re.search(
+        r"(?<!\w)(?:ن(?:خور|نوش|رو|ری|رم|ره|رید|ریم|کن|بر|خواب|گیر|بین|خر|فرست|زن|ذار|گو|ده)\w*"
+        r"|نمی\s*(?:خور|نوش|رو|ری|کن|بر|خواب|گیر|بین|خر|فرست|زن|ذار|گو|ده)\w*)"
+        r"|\b(?:don't|do not|never)\b", value, re.I,
+    ))
+
+
+def reminder_wording_matches_task(task: str, phrase: str, *, confirmation: bool = False) -> bool:
+    """Check the saved task is not lost in a generated, non-neutral phrase.
+
+    At delivery require its meaningful words/quantities. A confirmation may be
+    neutral ("I'll remind you") without repeating the task. Conservative false
+    negatives use a factual fallback; this check cannot prove semantic accuracy.
+    """
+    required = _wording_terms(task)
+    if not required:
+        return False
+    candidate = str(phrase or "")
+    if _has_negated_task_action(candidate) != _has_negated_task_action(task):
+        return False
+    if confirmation:
+        for time_phrase in explicit_reminder_time_phrases(candidate):
+            candidate = candidate.replace(time_phrase, " ")
+    offered = _wording_terms(candidate, confirmation=confirmation)
+    if confirmation and not offered:
+        return True
+    required_numbers = {word for word in required if word.isdigit()}
+    offered_numbers = {word for word in offered if word.isdigit()}
+    if required_numbers and required_numbers != offered_numbers:
+        return False
+    # «وقت داروته» naturally implies taking the medicine, even though it omits
+    # the verb. Do not apply this shorthand to a negated or different action.
+    medicine_due = bool(
+        "خور" in required and any(x in required for x in ("دارو", "قرص"))
+        and re.search(r"(?:وقت|نوبت)\s*(?:دارو|قرص)", _normalized(candidate), re.I)
+        and not re.search(r"ن(?:خور|کن)", _normalized(candidate), re.I)
+    )
+    return all(
+        (medicine_due and word == "خور")
+        or any(word == item or (len(word) >= 3 and item.startswith(word)) for item in offered)
+        for word in required
+    )
 
 
 def explicit_reminder_time_count(text: str) -> int:
@@ -251,7 +345,11 @@ def is_reminder_request(text: str) -> bool:
     after = value[match.end():]
     has_time = bool(_ABSOLUTE.search(value) or _NAMED_DAY.search(value)
                     or any(m.group("prefix") or m.group("suffix") for m in _RELATIVE.finditer(value)))
-    if not has_time and re.search(r"(?:چیه|چیست|چی بود|چه بود|کی بود|اسمم چیه|\bwhat\b)", after, re.I):
+    if not has_time and re.search(
+        r"(?:چیه|چیست|چی بود|چه بود|\b(?:چی|کی|کیم|کیه|کیستی|کجا|کجاست)\b|"
+        r"چه کسی|\b(?:what|who|where)\b)",
+        after, re.I,
+    ):
         return False
     return True
 
@@ -556,16 +654,14 @@ class ReminderScheduler:
                 result = await self.compose_message(row)
                 if isinstance(result, str) and 0 < len(result.strip()) <= 1000:
                     result = result.strip()
-                    # The natural paraphrase may omit or change a detail. Keep
-                    # the user's exact saved task visible as a factual backstop.
-                    if task not in result:
-                        result += f"\n\nمتن یادآوری: {task}"
-                    return result
+                    if reminder_wording_matches_task(task, result):
+                        return result
+                    logger.warning("Reminder wording did not preserve the task | id=%s", row["id"])
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.warning("Reminder composition failed | id=%s", row["id"], exc_info=True)
-        return f"⏰ وقتشه یادت بندازم: {task}"
+        return f"یادت نره: {task}"
 
     async def run_once(self) -> bool:
         row = self.store.claim_due()

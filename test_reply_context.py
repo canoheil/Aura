@@ -72,12 +72,14 @@ def test_no_reply_returns_none():
     assert build_reply_context(None) is None
 
 
-def test_reply_context_is_high_priority_before_current_message():
+def test_reply_context_is_user_data_before_current_message():
     history = [{"role": "system", "content": "system"}]
     result = build_request_with_reply_context(history, "ائورا اینو توضیح بده", "[REPLY]")
     assert result[0] == history[0]
-    assert result[1] == {"role": "system", "content": "[REPLY]"}
-    assert result[2] == {"role": "user", "content": "ائورا اینو توضیح بده"}
+    assert result[1] == {
+        "role": "user",
+        "content": "[REPLY]\n\n[CURRENT USER MESSAGE]\nائورا اینو توضیح بده",
+    }
 
 
 def test_no_reply_preserves_normal_request_shape():

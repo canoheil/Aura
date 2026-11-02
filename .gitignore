@@ -42,3 +42,9 @@ tmp/
 Thumbs.db
 .vscode/
 .idea/
+
+# Service runtime files
+*.lock
+aura.pid
+aura.log
+aura_watchdog.log

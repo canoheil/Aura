@@ -10,16 +10,45 @@
 ### END INIT INFO
 
 NAME="aura"
-DIR="/home/auracom/aura"
-PYTHON="/home/auracom/virtualenv/aura/3.11/bin/python"
+
+# Portable paths. Nothing is hard-coded to one host any more:
+#   AURA_DIR     project directory that contains bot.py
+#                (default: the directory holding this script)
+#   AURA_PYTHON  interpreter to run (default: the project virtualenv, else python3)
+#   AURA_PIDFILE / AURA_LOGFILE  optional overrides for runtime files
+# Put runtime files outside the checkout with AURA_PIDFILE/AURA_LOGFILE; set
+# these in the environment or in /etc/default/aura instead of editing this file.
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+DIR="${AURA_DIR:-$SCRIPT_DIR}"
+
+if [ -n "${AURA_PYTHON:-}" ]; then
+    PYTHON="$AURA_PYTHON"
+elif [ -x "$DIR/.venv/bin/python" ]; then
+    PYTHON="$DIR/.venv/bin/python"
+elif [ -x "$DIR/venv/bin/python" ]; then
+    PYTHON="$DIR/venv/bin/python"
+else
+    PYTHON=$(command -v python3 || command -v python)
+fi
+
+if [ -z "$PYTHON" ] || [ ! -x "$PYTHON" ]; then
+    echo "No usable Python interpreter found. Set AURA_PYTHON to one." >&2
+    exit 1
+fi
+
 SCRIPT="$DIR/bot.py"
-PIDFILE="$DIR/aura.pid"
-LOGFILE="$DIR/aura.log"
+PIDFILE="${AURA_PIDFILE:-$DIR/aura.pid}"
+LOGFILE="${AURA_LOGFILE:-$DIR/aura.log}"
 
 start() {
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
         echo "Aura is already running."
         return 0
+    fi
+
+    if [ ! -f "$SCRIPT" ]; then
+        echo "Cannot start Aura: $SCRIPT does not exist." >&2
+        return 1
     fi
 
     cd "$DIR" || exit 1
@@ -79,4 +108,6 @@ case "$1" in
         ;;
 esac
 
-exit 0
+# Preserve the action's own exit status: `status` must return 3 when Aura is
+# stopped so callers such as monitoring or `set -e` scripts see the truth.
+exit $?

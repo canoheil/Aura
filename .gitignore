@@ -48,3 +48,6 @@ Thumbs.db
 aura.pid
 aura.log
 aura_watchdog.log
+
+# Local encryption key for provider secrets stored from /admin
+.aura_secret_key

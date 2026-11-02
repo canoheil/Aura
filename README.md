@@ -62,8 +62,20 @@ reproducible environment.
 
 ```env
 TELEGRAM_BOT_TOKEN=...
+```
+
+plus **one** model provider:
+
+```env
+# native Google SDK
 GEMINI_API_KEY=...
 GEMINI_MODEL=gemini-3.1-flash-lite
+
+# or any OpenAI-compatible gateway
+LLM_PROVIDER=openai_compat
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
 ```
 
 ### Optional variables
@@ -124,6 +136,72 @@ GEMINI_MODEL=gemini-3.1-flash-lite
 - `MEME_ALLOW_NSFW`
 - `MEME_ALLOWED_SUBREDDITS`
 - `MEME_TOOL_MAX_CALLS`
+
+## Model providers
+
+Aura is not tied to one vendor. `LLM_PROVIDER` selects how the model is reached,
+and only the selected provider needs a key.
+
+| Provider | What it is | Typical settings |
+| --- | --- | --- |
+| `gemini` (default) | native Google SDK, function calling, inline images | `GEMINI_API_KEY`, `GEMINI_MODEL` |
+| `openai_compat` | anything speaking `POST /chat/completions` | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` |
+
+`openai_compat` covers OpenAI, OpenRouter, Groq, DeepSeek, Together, Fireworks,
+LM Studio, vLLM and Ollama (`http://localhost:11434/v1`). Point
+`OPENAI_BASE_URL` at the gateway root — the `/chat/completions` path is appended.
+
+Both paths run the *same* agent runtime: the same `ToolRegistry`, the same
+`AgentRunner` budgets, duplicate-call suppression, forced web search on
+time-sensitive questions, and the same refusal to answer a "current" question
+without retrieved evidence. Switching a provider never weakens those guarantees.
+
+Provider choice, keys and models can be changed from Telegram with `/admin`
+(see below); changes take effect on the next message, no restart needed. Keys
+entered there are encrypted at rest with `cryptography` using a key from
+`AURA_SECRET_KEY` or a generated `.aura_secret_key` file.
+
+A deployment that only has an OpenAI-compatible key starts and runs without
+`GEMINI_API_KEY`. The two Gemini-only extras — AI-chosen message reactions and
+the `/models` listing — degrade gracefully instead of failing a turn.
+
+## Administration from Telegram
+
+`/admin` opens a panel for the founder (`FOUNDER_USER_ID`) and anyone listed in
+`ADMIN_USER_IDS` (comma-separated Telegram user IDs). It works in private chats
+only, because it can show provider hostnames and key hints.
+
+```
+/admin                     open the panel
+/admin set <key> <value>   change one setting
+/admin unset <key>         drop the override (falls back to .env, then default)
+/admin show <key>          explain a setting; secrets stay masked
+/admin test                call the configured provider and report reachability
+/admin audit               recent changes with who made them
+```
+
+Toggles can also be flipped with the inline buttons. Settings are validated on
+write — an out-of-range number or an unknown key is rejected with the reason,
+not stored. Every change is recorded in `app_settings_audit`.
+
+What is editable: provider, keys, models and timeouts; the agent round and
+tool-call budgets; feature switches (web search and its daily limit, weather,
+memes, stickers, image generation, SVG, reactions, rolling summaries); the
+default timezone and language. Precedence is always
+**database override → environment → default**, and `unset` returns a value to
+its `.env` source.
+
+Two classes of change behave differently:
+
+- provider, model, keys and agent budgets apply immediately;
+- feature switches and `MAX_CONCURRENT_CHATS` are read at startup and marked as
+  needing a restart.
+
+Secrets are never echoed back. `/admin show` prints a mask such as
+`sk-a…9f3 (51 chars)`, and the stored value is encrypted when `cryptography` is
+installed (`pip install -r requirements.txt` installs it). If you rotate
+`AURA_SECRET_KEY`, stored keys become unreadable and must be re-entered —
+environment keys are unaffected.
 
 ## Stickers
 

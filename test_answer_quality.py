@@ -4,8 +4,6 @@ import asyncio
 import pytest
 
 from answer_quality import (
-    format_search_sources,
-    format_search_source_messages,
     has_web_evidence,
     remove_generated_source_section,
     search_source_urls,
@@ -73,22 +71,13 @@ def test_sources_only_come_from_successful_tool_results():
     ]
     assert has_web_evidence(events)
     assert search_source_urls(events) == ["https://source.test/a?x=1&y=2", "https://source.test/b"]
-    assert "bad.test" not in format_search_sources(events)
+    assert all("bad.test" not in url for url in search_source_urls(events))
 
 
 def test_a_bare_link_does_not_count_as_current_search_evidence():
     events = [{"tool": "web_search", "result": {"ok": True, "results": [{"url": "https://source.test"}]}}]
     assert search_source_urls(events) == ["https://source.test"]
     assert not has_web_evidence(events)
-
-
-def test_long_source_urls_are_never_split_across_messages():
-    urls = [f"https://example.org/{i}/" + ("a" * 900) for i in range(5)]
-    events = [{"tool": "web_search", "result": {"ok": True, "results": [{"url": u} for u in urls]}}]
-    messages = format_search_source_messages(events)
-    assert len(messages) == 2
-    assert all(any(url in message for message in messages) for url in urls)
-    assert all(len(message.encode("utf-16-le")) // 2 <= 3500 for message in messages)
 
 
 def test_forced_search_failure_cannot_become_an_unverified_current_answer():
@@ -131,7 +120,7 @@ def test_real_handler_drops_hallucinated_source_when_search_was_not_run(isolated
     assert update.message.reply_text.await_args.args[0] == "پاسخ"
 
 
-def test_real_handler_delivers_only_retrieved_sources(isolated_bot, monkeypatch):
+def test_real_handler_sends_only_the_answer_without_a_source_list(isolated_bot, monkeypatch):
     bot, client = isolated_bot
     client.models.responses = [
         _tool_response("web_search", {"query": "python"}),
@@ -150,6 +139,19 @@ def test_real_handler_delivers_only_retrieved_sources(isolated_bot, monkeypatch)
     asyncio.run(bot.message_handler(update, context))
 
     replies = [call.args[0] for call in update.message.reply_text.await_args_list]
-    assert replies == ["نتیجهٔ جست‌وجو", f"🔎 منابع بازیابی‌شده:\n• {source}"]
-    assert "parse_mode" not in update.message.reply_text.await_args_list[-1].kwargs
+    # One message only: the answer. Search results, including the retrieved
+    # URL, are evidence for the model and are never displayed as a list.
+    assert replies == ["نتیجهٔ جست‌وجو"]
+    assert source not in " ".join(replies)
     assert "invented.test" not in " ".join(replies)
+
+
+def test_sources_only_answer_becomes_a_neutral_line(isolated_bot):
+    bot, client = isolated_bot
+    client.models.responses = [_text_response("Sources:\nhttps://invented.test")]
+    update, context, _ = _telegram_update()
+    update.message.text = "یک توضیح بده"
+    asyncio.run(bot.message_handler(update, context))
+    replies = [call.args[0] for call in update.message.reply_text.await_args_list]
+    assert replies == ["جواب مشخصی برای این سؤال پیدا نکردم."]
+    assert "منبع" not in " ".join(replies)

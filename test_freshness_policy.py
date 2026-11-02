@@ -329,9 +329,14 @@ def _agent_namespace(*, client, registry, runner, max_rounds=3):
     from answer_quality import has_web_evidence, has_any_web_evidence
     from observability import RequestTrace
 
+    from i18n import t as _t
+
     _, funcs = _source_and_functions()
     ns = {
         "types": types,
+        # ask_gemini() renders its "no verified evidence" refusal through the
+        # catalog, so the extracted namespace must provide the translator.
+        "_t": _t,
         "base64": base64,
         "Optional": __import__("typing").Optional,
         "AGENT_MAX_ROUNDS": max_rounds,

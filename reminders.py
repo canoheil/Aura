@@ -22,6 +22,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from telegram.error import BadRequest, Forbidden, RetryAfter
 
+import i18n
+
 logger = logging.getLogger("aura-reminders")
 DEFAULT_TIMEZONE = "Asia/Tehran"
 MAX_TEXT_LENGTH = 500
@@ -320,11 +322,14 @@ class ReminderSpec:
 def timezone_for(name: str) -> ZoneInfo:
     value = str(name or "").strip()
     if not value or len(value) > 100:
-        raise ReminderError("منطقهٔ زمانی معتبر نیست؛ مثلاً Asia/Tehran یا Europe/Berlin بفرست.")
+        raise ReminderError("منطقهٔ زمانی معتبر نیست؛ مثلاً Asia/Tehran یا Europe/Berlin بفرست.", code="invalid_timezone")
     try:
         return ZoneInfo(value)
     except (ZoneInfoNotFoundError, ValueError):
-        raise ReminderError("منطقهٔ زمانی پیدا نشد؛ از نام IANA مثل Asia/Tehran یا Europe/Berlin استفاده کن.") from None
+        raise ReminderError(
+            "منطقهٔ زمانی پیدا نشد؛ از نام IANA مثل Asia/Tehran یا Europe/Berlin استفاده کن.",
+            code="unknown_timezone",
+        ) from None
 
 
 def is_reminder_request(text: str) -> bool:
@@ -363,9 +368,15 @@ def _local_to_utc(local: datetime, zone: ZoneInfo) -> datetime:
         if utc.astimezone(zone).replace(tzinfo=None) == local and utc not in options:
             options.append(utc)
     if not options:
-        raise ReminderError("این ساعت به‌خاطر تغییر ساعت در منطقهٔ زمانی انتخاب‌شده وجود ندارد؛ ساعت دیگری بفرست.")
+        raise ReminderError(
+            "این ساعت به‌خاطر تغییر ساعت در منطقهٔ زمانی انتخاب‌شده وجود ندارد؛ ساعت دیگری بفرست.",
+            code="nonexistent_time",
+        )
     if len(options) > 1:
-        raise ReminderError("این ساعت به‌خاطر تغییر ساعت دو بار تکرار می‌شود؛ ساعت دیگری یا تاریخ با اختلاف UTC صریح بفرست.")
+        raise ReminderError(
+            "این ساعت به‌خاطر تغییر ساعت دو بار تکرار می‌شود؛ ساعت دیگری یا تاریخ با اختلاف UTC صریح بفرست.",
+            code="repeated_local_time",
+        )
     return options[0]
 
 
@@ -459,12 +470,15 @@ def parse_reminder(text: str, zone_name: str, *, now: Optional[datetime] = None,
     except ReminderError:
         raise
     except (ValueError, OverflowError):
-        raise ReminderError("تاریخ یا ساعت معتبر نیست؛ تاریخ را میلادی و به شکل YYYY-MM-DD HH:MM بفرست.") from None
+        raise ReminderError(
+            "تاریخ یا ساعت معتبر نیست؛ تاریخ را میلادی و به شکل YYYY-MM-DD HH:MM بفرست.",
+            code="invalid_datetime",
+        ) from None
     delta = (due - current).total_seconds()
     if delta < 5:
-        raise ReminderError("زمان یادآوری باید دست‌کم چند ثانیه در آینده باشد.")
+        raise ReminderError("زمان یادآوری باید دست‌کم چند ثانیه در آینده باشد.", code="time_too_soon")
     if delta > MAX_FUTURE_SECONDS:
-        raise ReminderError("زمان یادآوری بیش از پنج سال در آینده است.")
+        raise ReminderError("زمان یادآوری بیش از پنج سال در آینده است.", code="time_too_far")
     spans = [match.span()]
     if trigger:
         spans.append(trigger.span())
@@ -472,7 +486,7 @@ def parse_reminder(text: str, zone_name: str, *, now: Optional[datetime] = None,
     if not content:
         raise ReminderError("چه چیزی را یادآوری کنم؟ متن یادآوری را هم بفرست.", code="missing_task")
     if len(content) > MAX_TEXT_LENGTH:
-        raise ReminderError(f"متن یادآوری خیلی طولانی است؛ حداکثر {MAX_TEXT_LENGTH} کاراکتر.")
+        raise ReminderError(f"متن یادآوری خیلی طولانی است؛ حداکثر {MAX_TEXT_LENGTH} کاراکتر.", code="text_too_long")
     return ReminderSpec(due_utc=due, text=content, timezone=zone.key)
 
 
@@ -529,14 +543,14 @@ class ReminderStore:
     def create(self, chat_id: int, user_id: int, spec: ReminderSpec, *, recipient_name: str = "") -> int:
         now = int(self.clock())
         if spec.due_utc.tzinfo is None or spec.due_utc.utcoffset() is None:
-            raise ReminderError("زمان یادآوری باید منطقهٔ زمانی مشخص داشته باشد.")
+            raise ReminderError("زمان یادآوری باید منطقهٔ زمانی مشخص داشته باشد.", code="missing_timezone")
         due = int(spec.due_utc.timestamp())
         if due < now + 1 or due > now + MAX_FUTURE_SECONDS:
-            raise ReminderError("زمان یادآوری باید در آینده و حداکثر پنج سال دیگر باشد.")
+            raise ReminderError("زمان یادآوری باید در آینده و حداکثر پنج سال دیگر باشد.", code="out_of_range")
         timezone_for(spec.timezone)
         text = str(spec.text or "").strip()
         if not text or len(text) > MAX_TEXT_LENGTH:
-            raise ReminderError("متن یادآوری خالی یا بیش از حد طولانی است.")
+            raise ReminderError("متن یادآوری خالی یا بیش از حد طولانی است.", code="bad_text")
         # A display name is only a label, never an authority for the mention.
         # Strip controls and bound it; Telegram IDs always come from the update.
         name = re.sub(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", " ", str(recipient_name or ""))
@@ -547,7 +561,7 @@ class ReminderStore:
                     "SELECT COUNT(*) AS n FROM reminders WHERE user_id=? AND status IN ('pending', 'sending')", (user_id,),
                 ).fetchone()["n"]
                 if count >= MAX_PENDING_PER_USER:
-                    raise ReminderError("تعداد یادآورهای فعال به سقف مجاز رسیده است؛ یکی را لغو کن.")
+                    raise ReminderError("تعداد یادآورهای فعال به سقف مجاز رسیده است؛ یکی را لغو کن.", code="limit_reached")
                 cur = self.db.execute("""INSERT INTO reminders
                     (chat_id, user_id, text, due_utc, timezone, created_at, status, next_attempt, recipient_name)
                     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
@@ -640,14 +654,25 @@ class ReminderStore:
 class ReminderScheduler:
     def __init__(self, store: ReminderStore, bot, *, poll_seconds: float = 3.0,
                  can_send: Optional[Callable[[int], bool]] = None,
-                 compose_message: Optional[Callable[[dict], Awaitable[str]]] = None):
+                 compose_message: Optional[Callable[[dict], Awaitable[str]]] = None,
+                 language: Optional[Callable[[dict], str]] = None):
         self.store, self.bot = store, bot
         self.poll_seconds = max(1.0, min(60.0, float(poll_seconds)))
         self.can_send = can_send
         self.compose_message = compose_message
+        # Delivery runs without an Update; the deployment supplies the recipient's
+        # language so a fallback wording never assumes Persian.
+        self.language = language
         self.stop_event = asyncio.Event()
 
-    async def _message_text(self, row: dict) -> str:
+    def _language(self, row: dict) -> Optional[str]:
+        try:
+            return self.language(row) if self.language else None
+        except Exception:
+            logger.warning("Reminder language lookup failed | id=%s", row.get("id"), exc_info=True)
+            return None
+
+    async def _message_text(self, row: dict, lang: Optional[str] = None) -> str:
         task = str(row["text"])
         if self.compose_message:
             try:
@@ -661,17 +686,18 @@ class ReminderScheduler:
                 raise
             except Exception:
                 logger.warning("Reminder composition failed | id=%s", row["id"], exc_info=True)
-        return f"یادت نره: {task}"
+        return i18n.t("reminder.delivery.fallback", lang, task=task)
 
     async def run_once(self) -> bool:
         row = self.store.claim_due()
         if not row:
             return False
+        lang = self._language(row)
         try:
             if self.can_send and not self.can_send(row["chat_id"]):
                 self.store.retry(row, delay=300, error="chat_not_allowed")
                 return True
-            message = await self._message_text(row)
+            message = await self._message_text(row, lang)
             # Access may have been revoked while the model was composing.
             if self.can_send and not self.can_send(row["chat_id"]):
                 self.store.retry(row, delay=300, error="chat_not_allowed")
@@ -680,7 +706,7 @@ class ReminderScheduler:
                 # Telegram's text-mention URL uses the authoritative stored ID.
                 # Escape *all* model and user text; neither can inject HTML or a
                 # mention for a different person. Pre-migration rows use a label.
-                raw_name = row.get("recipient_name") or "دوست من"
+                raw_name = row.get("recipient_name") or i18n.t("reminder.delivery.recipient", lang)
                 name = html.escape(raw_name)
                 mention = f'<a href="tg://user?id={int(row["user_id"])}">{name}</a>'
                 try:

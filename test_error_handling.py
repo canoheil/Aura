@@ -22,7 +22,9 @@ def test_gemini_auth_error():
 
 def test_gemini_unknown_error_is_generic():
     err = classify_gemini_error(None, "some internal stack trace")
-    assert err.message == "❌ در ارتباط با Gemini خطایی رخ داد. لطفاً دوباره امتحان کن."
+    # The wording names "the model service", not one vendor: Aura can run on
+    # Gemini or any OpenAI-compatible gateway.
+    assert err.message == "❌ در ارتباط با سرویس مدل خطایی رخ داد. لطفاً دوباره امتحان کن."
     assert "stack trace" not in err.message
 
 
@@ -41,3 +43,9 @@ def test_generic_error_does_not_expose_logs():
     err = generic_user_error()
     assert "log" not in err.message.lower()
     assert "جزئیات" not in err.message
+
+
+def test_errors_are_localized_without_changing_the_default():
+    assert "model service" in classify_gemini_error(None, "", lang="en").message
+    assert "سرویس مدل" in classify_gemini_error(None, "").message
+    assert "Telegram" in classify_telegram_error("Forbidden", "", lang="en").message

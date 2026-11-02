@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+import i18n
 from answer_quality import has_any_web_evidence, has_web_evidence
 from tool_system import AgentRunState, AgentRunner, ToolRegistry, text_has_tool_declaration
 
@@ -476,6 +477,7 @@ def ask_agent(
     current_user_text: Optional[str] = None,
     require_search_evidence: bool = False,
     max_rounds: int = 5,
+    lang: Optional[str] = None,
 ) -> tuple[str, Optional[dict], list[dict]]:
     """Run one bounded agent task against an OpenAI-compatible endpoint.
 
@@ -531,10 +533,7 @@ def ask_agent(
         missing_evidence = searched and not has_any_web_evidence(state.events)
         if missing_required or missing_evidence:
             logger.warning("Provider web evidence unavailable; refusing an unverified answer")
-            return (
-                "نتونستم اطلاعات به‌روز و منبع قابل بررسی برای این سؤال پیدا کنم؛ "
-                "فعلاً نمی‌تونم جواب مطمئنی بدم. لطفاً بعداً دوباره امتحان کن."
-            )
+            return i18n.t("web.no_evidence", lang)
         return answer
 
     for round_number in range(max_rounds + 1):

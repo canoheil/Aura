@@ -134,34 +134,3 @@ def remove_generated_source_section(answer: str, *, user_text: str = "") -> str:
         after = "".join(lines[end:]).lstrip("\n")
         return "\n\n".join(part for part in (before, after) if part).strip("\r\n")
     return answer
-
-
-def format_search_source_messages(events: list[dict], *, limit: int = 3500) -> list[str]:
-    """Group complete retrieved URLs into plain Telegram messages, never splitting a URL."""
-    urls = search_source_urls(events)
-    if not urls:
-        return []
-
-    def units(value: str) -> int:
-        return len(value.encode("utf-16-le")) // 2
-
-    header = "🔎 منابع بازیابی‌شده:"
-    chunks: list[str] = []
-    current = header
-    for url in urls:
-        line = "\n• " + url
-        if units(header + line) > limit:
-            continue
-        if units(current + line) > limit:
-            chunks.append(current)
-            current = header
-        current += line
-    if current != header:
-        chunks.append(current)
-    return chunks
-
-
-def format_search_sources(events: list[dict]) -> str:
-    """Convenience formatter for a single source message."""
-    messages = format_search_source_messages(events)
-    return messages[0] if messages else ""

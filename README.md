@@ -226,11 +226,13 @@ answer instead of presenting a remembered fact as current. The same evidence
 check applies when forcing is downgraded by the soft ceiling. On `hint` Aura is
 told to search unless she is sure; `off` adds nothing.
 
-Successful web tool results are displayed separately as “retrieved sources,”
-using only the returned HTTP(S) URLs. This label does not assert that every
-source supports every claim. Model-generated source sections are discarded
-unless copied from the user's own text, and code/indentation and literal arrays
-such as `[1]` are preserved.
+Web tool results stay internal. Aura sends only her answer, never a separate
+“retrieved sources” message, so search evidence grounds the reply without
+appending a link list the user did not ask for. Model-generated source sections
+are discarded unless copied from the user's own text; if nothing else remains,
+Aura says plainly that she found no clear answer instead of referencing sources
+that are not shown. Code indentation and literal arrays such as `[1]` are
+preserved.
 
 Cost is bounded on purpose:
 

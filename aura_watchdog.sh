@@ -1,14 +1,29 @@
 #!/bin/sh
 
-DIR="/home/auracom/aura"
-SERVICE="$DIR/aura_service.sh"
-PIDFILE="$DIR/aura.pid"
-LOGFILE="$DIR/aura_watchdog.log"
+# Watchdog for the Aura service. Run it from cron (for example every minute):
+#   * * * * * AURA_DIR=/srv/aura /srv/aura/aura_watchdog.sh
+#
+# Paths are resolved from this script's location, so a checkout works anywhere.
+# AURA_DIR / AURA_PYTHON are forwarded to aura_service.sh by using it directly.
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+DIR="${AURA_DIR:-$SCRIPT_DIR}"
+SERVICE="${AURA_SERVICE:-$DIR/aura_service.sh}"
+# If AURA_DIR points at a data directory that is not the checkout, fall back to
+# the service script sitting next to this watchdog.
+[ -x "$SERVICE" ] || SERVICE="$SCRIPT_DIR/aura_service.sh"
+PIDFILE="${AURA_PIDFILE:-$DIR/aura.pid}"
+LOGFILE="${AURA_LOGFILE:-$DIR/aura_watchdog.log}"
 LOCKFILE="$DIR/aura_watchdog.lock"
 
 log() {
     printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOGFILE"
 }
+
+if [ ! -x "$SERVICE" ]; then
+    echo "Cannot run watchdog: $SERVICE is missing or not executable." >&2
+    exit 1
+fi
 
 if [ -f "$LOCKFILE" ]; then
     exit 0
@@ -51,7 +66,7 @@ fi
 
 # PID file is missing/stale. Before starting, check whether Aura
 # already exists independently of the PID file.
-AURA_PID="$(pgrep -f "$DIR/bot.py" | head -n 1)"
+AURA_PID="$(pgrep -f -- "$DIR/bot.py" | head -n 1)"
 
 if [ -n "$AURA_PID" ]; then
     log "Aura already running with PID $AURA_PID; synchronizing PID file."

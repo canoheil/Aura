@@ -1,0 +1,9 @@
+# Development-only dependencies. Runtime dependencies live in requirements.txt.
+# Usage:
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements-dev.txt
+#   python -m pytest
+-r requirements.txt
+
+# Test runner. Kept as a wide-enough range so CI and local runs agree on behavior.
+pytest>=8.3,<10

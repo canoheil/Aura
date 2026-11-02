@@ -1,8 +1,13 @@
 # Aura — Production Gemini Build
 
+[![tests](https://github.com/canoheil/Aura/actions/workflows/tests.yml/badge.svg)](https://github.com/canoheil/Aura/actions/workflows/tests.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Aura is a personal Telegram AI assistant powered by Google's Gemini API.
 
 This repository contains the public application code and configuration template. Secrets, the local SQLite database, logs, PID files, and virtual environments are intentionally excluded.
+
+Aura is open source under the [MIT License](LICENSE). Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md), and report vulnerabilities privately as described in [SECURITY.md](SECURITY.md). Third-party attributions live in [NOTICE](NOTICE).
 
 ## Features
 
@@ -48,6 +53,10 @@ cp .env.example .env
 ```
 
 Then edit `.env` and set your real credentials.
+
+`requirements-pinned.txt` holds the exact versions the current build was
+validated against; use it instead of `requirements.txt` when you need a
+reproducible environment.
 
 ### Required variables
 
@@ -372,6 +381,47 @@ python bot.py
 
 Aura uses Telegram long polling, so no Telegram webhook is required.
 
+## Tests
+
+The suite is hermetic: it uses fake Telegram and Gemini clients, needs no API
+keys, and makes no network calls.
+
+```bash
+pip install -r requirements-dev.txt   # runtime dependencies + pytest
+python -m pytest
+```
+
+Everything must pass before a pull request is merged; the same command runs in
+CI (`.github/workflows/tests.yml`). Tests live next to the modules they cover and
+are named `test_*.py`. When you change behavior, add a test that fails without
+your fix.
+
+## Running as a service
+
+`aura_service.sh` (start/stop/restart/status) and `aura_watchdog.sh` (cron
+restart guard) resolve their paths from their own location, so a checkout works
+anywhere:
+
+```bash
+./aura_service.sh start
+AURA_DIR=/srv/aura ./aura_watchdog.sh    # from cron, e.g. every minute
+```
+
+Overrides, if you keep data outside the checkout:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `AURA_DIR` | project directory | directory of the script |
+| `AURA_PYTHON` | interpreter to run | `.venv/bin/python`, else `python3` |
+| `AURA_PIDFILE` | PID file | `$AURA_DIR/aura.pid` |
+| `AURA_LOGFILE` | service log | `$AURA_DIR/aura.log` |
+| `AURA_SERVICE` | service script the watchdog controls | `$AURA_DIR/aura_service.sh` |
+
+`aura_service.sh status` exits with `3` when Aura is stopped, so monitoring and
+`set -e` scripts can rely on it.
+
+For a real init system, prefer a systemd unit over the shell wrapper.
+
 ## Database and memory
 
 Aura stores conversation history, web-search cache/usage, and long-term memory in `bot.db`.
@@ -404,8 +454,20 @@ Never commit:
 - `bot.db`
 - logs containing API URLs or credentials
 
-If a credential is ever exposed, revoke/rotate it immediately.
+If a credential is ever exposed, revoke/rotate it immediately. For reporting a
+vulnerability, use the private process in [SECURITY.md](SECURITY.md) — please do
+not open a public issue with exploit details.
 
 ## Project status
 
-This repository represents the Production Gemini architecture of Aura.
+This repository represents the Production Gemini architecture of Aura. It is
+under active development on `main`; only `main` is supported.
+
+## License
+
+Released under the [MIT License](LICENSE). Copyright (c) 2026 canoheil and Aura
+contributors.
+
+Bundled third-party assets and dependency licenses are listed in
+[NOTICE](NOTICE). The Vazirmatn fonts in `assets/fonts/` are distributed under
+the SIL Open Font License 1.1, reproduced in `assets/fonts/OFL.txt`.

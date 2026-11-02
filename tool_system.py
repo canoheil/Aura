@@ -82,6 +82,15 @@ def has_textual_tool_declaration(response: Any, *, user_text: str = "") -> bool:
         )
     else:
         text = getattr(response, "text", None)
+    return text_has_tool_declaration(text, user_text=user_text)
+
+
+def text_has_tool_declaration(text: Any, *, user_text: str = "") -> bool:
+    """Provider-independent leak check for plain text answers.
+
+    Gemini gets this through function-call parts; OpenAI-compatible providers can
+    only leak the same syntax as text, so the guard is shared.
+    """
     if not isinstance(text, str):
         return False
 

@@ -83,6 +83,23 @@ root to `sys.path`, so a test imports `bot`, `i18n` or `reminders` directly, and
 reads committed files through a module-level `ROOT` path
 (`Path(__file__).resolve().parent.parent`) rather than the current directory.
 
+## Documentation
+
+`README.md` is the front door and stays short: what Aura is, why it is
+different, how to start it in five commands, and a table of links. Long-form
+material lives in `docs/`, one topic per file, and `README.fa.md` mirrors the
+front page in Persian.
+
+Three rules are enforced by `tests/test_docs.py`, so documentation rots loudly
+instead of quietly:
+
+- every relative link in these files must resolve;
+- every page in `docs/` must be linked from `README.md`;
+- every setting in `settings_store.SPECS` must appear in `.env.example`.
+
+When you add a feature, update the document that owns it rather than appending a
+new section to the README.
+
 ## Style
 
 - Python 3.11+, standard library first. `ruff check .` must pass.

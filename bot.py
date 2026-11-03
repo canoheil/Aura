@@ -70,6 +70,8 @@ from settings_store import SPECS, SettingError, SettingsStore
 from admin_panel import AdminAccess, admin_callback, admin_command
 from retry_policy import call_with_retry, extract_status_code
 from observability import RequestTrace
+import i18n
+from i18n import t as _t
 from aura_identity import AuraIdentity
 from aura_self_identity import AuraSelfIdentityBoundary
 from aura_personality_boundary import (
@@ -788,6 +790,9 @@ reminder_store = ReminderStore(db, db_lock, default_timezone=REMINDER_DEFAULT_TI
 # Runtime settings (database overrides with env fallback) and who may edit them
 # from Telegram. Created here because both need the database connection.
 SETTINGS = SettingsStore(db, db_lock, db_path=DB_FILE)
+# Per-user interface language (set with /language). Falls back to the
+# deployment-wide `bot_language` setting, then Persian.
+LANGUAGE_STORE = i18n.LanguageStore(db, db_lock)
 ADMIN_ACCESS = AdminAccess.from_env(FOUNDER_USER_ID)
 logger.info(
     "Settings ready | provider=%s | encryption=%s | admins=%s",
@@ -797,6 +802,38 @@ logger.info(
 
 def now() -> int:
     return int(time.time())
+
+
+def reminder_error_text(exc: Exception, lang: Optional[str] = None) -> str:
+    """Localized reminder error for callers that only know the language code."""
+    code = str(getattr(exc, "code", "") or "")
+    if code and i18n.has_key(f"reminder.err.{code}"):
+        return _t(f"reminder.err.{code}", lang, limit=MAX_TEXT_LENGTH)
+    return str(exc)
+
+
+def reminder_error_message(exc: Exception, update: Optional[Update] = None) -> str:
+    """Localized text for a ReminderError, keyed by its stable error code.
+
+    The parser raises Persian messages with codes; translating by code keeps the
+    parser free of presentation concerns and avoids parsing message text.
+    """
+    return reminder_error_text(exc, user_language(update))
+
+
+def user_language(update: Optional[Update] = None, user_id: Optional[int] = None) -> str:
+    """Interface language for this user: their choice, then the deployment default."""
+    uid = user_id
+    if uid is None and update is not None and update.effective_user:
+        uid = update.effective_user.id
+    return i18n.resolve_language(
+        store=LANGUAGE_STORE, user_id=uid, default=SETTINGS.get("bot_language"),
+    )
+
+
+def tr(key: str, update: Optional[Update] = None, **values) -> str:
+    """Translate a user-facing string for the current user."""
+    return _t(key, user_language(update), **values)
 
 
 def configured_provider() -> str:
@@ -992,8 +1029,12 @@ def build_system_prompt(update: Optional[Update] = None, *, chat_id: Optional[in
         model_key = chat_id if chat_id is not None and chat_id < 0 else user_id
         verified_founder = bool(FOUNDER_USER_ID and user_id == FOUNDER_USER_ID)
     configured_model = model if model is not None else (get_user_model(model_key) if model_key is not None else "")
+    # The interface language is an application setting, not something the model
+    # should infer from a single message.
+    interface_language = user_language(update, user_id=user_id)
     aura_identity = AuraIdentity(model=configured_model)
-    prompt = SYSTEM_PROMPT + "\n\n" + aura_identity.system_context(FOUNDER_USER_ID)
+    prompt = SYSTEM_PROMPT + "\n\n" + i18n.system_instruction(interface_language)
+    prompt += "\n\n" + aura_identity.system_context(FOUNDER_USER_ID)
     prompt += "\n\n" + AuraSelfIdentityBoundary().system_context()
     prompt += "\n\n" + AuraPersonalityBoundary().system_context()
 
@@ -2481,37 +2522,38 @@ def _tool_schedule_reminder(args: dict) -> dict:
     after SQLite's commit. Multiple calls in one agent task are prohibited.
     """
     ctx = args.get("_reminder")
+    lang = (ctx or {}).get("lang") if isinstance(ctx, dict) else None
     if not isinstance(ctx, dict) or not ctx.get("explicit"):
         return {"ok": False, "code": "missing_intent", "safe_user_message":
-                "هنوز یادآوری ثبت نکردم؛ زمان و کاری را که می‌خواهی بگو."}
+                _t("reminder.fallback.nothing", lang)}
     sources = ctx.get("sources")
     if not isinstance(sources, (list, tuple)) or not sources or not all(isinstance(x, str) for x in sources):
-        return {"ok": False, "code": "invalid", "safe_user_message": "درخواست یادآوری مشخص نیست؛ چیزی ثبت نکردم."}
+        return {"ok": False, "code": "invalid", "safe_user_message": _t("reminder.err.missing_intent", lang)}
     if any(has_recurring_reminder(x) for x in sources):
-        return {"ok": False, "code": "recurring", "safe_user_message": "یادآور تکراری فعلاً پشتیبانی نمی‌شود."}
+        return {"ok": False, "code": "recurring", "safe_user_message": _t("reminder.err.recurring", lang)}
     if (any(ambiguous_reminder_source(x) for x in sources)
             or sum(explicit_reminder_time_count(x) for x in sources) > 1):
-        return {"ok": False, "code": "ambiguous_time", "safe_user_message": "زمان دقیق را مشخص کن؛ هنوز چیزی ثبت نکردم."}
+        return {"ok": False, "code": "ambiguous_time", "safe_user_message": _t("reminder.err.ambiguous_time", lang)}
 
     when, task = args.get("when"), args.get("task")
     if not isinstance(when, str) or not when.strip() or not any(reminder_source_contains(x, when) for x in sources):
-        return {"ok": False, "code": "missing_time", "safe_user_message": "کی یادآوری کنم؟ هنوز چیزی ثبت نکردم."}
+        return {"ok": False, "code": "missing_time", "safe_user_message": _t("reminder.err.missing_time", lang)}
     if not isinstance(task, str) or not task.strip() or not any(reminder_source_contains(x, task) for x in sources):
-        return {"ok": False, "code": "missing_task", "safe_user_message": "چی رو یادآوری کنم؟ هنوز چیزی ثبت نکردم."}
+        return {"ok": False, "code": "missing_task", "safe_user_message": _t("reminder.err.missing_task", lang)}
     when, task = when.strip(), task.strip()
     if (len(when) > 160 or len(task) > MAX_TEXT_LENGTH or reminder_source_contains(task, when)
             or reminder_time_reply(task) is not None):
-        return {"ok": False, "code": "invalid", "safe_user_message": "زمان و متن یادآوری را واضح‌تر بگو؛ چیزی ثبت نکردم."}
+        return {"ok": False, "code": "invalid", "safe_user_message": _t("reminder.err.invalid", lang)}
     try:
         full_task = grounded_reminder_task(list(sources), when)
     except ReminderError as exc:
-        return {"ok": False, "code": exc.code, "safe_user_message": str(exc)}
+        return {"ok": False, "code": exc.code, "safe_user_message": reminder_error_text(exc, lang)}
     if full_task is not None and (not reminder_source_contains(full_task, task)
                                   or not reminder_source_contains(task, full_task)):
-        return {"ok": False, "code": "ambiguous_task", "safe_user_message": "متن کامل یادآوری را واضح بگو؛ چیزی ثبت نکردم."}
+        return {"ok": False, "code": "ambiguous_task", "safe_user_message": _t("reminder.err.invalid", lang)}
     chat_id, user_id = ctx.get("chat_id"), ctx.get("user_id")
     if not isinstance(chat_id, int) or not isinstance(user_id, int) or user_id <= 0:
-        return {"ok": False, "code": "invalid", "safe_user_message": "درخواست یادآوری مشخص نیست؛ چیزی ثبت نکردم."}
+        return {"ok": False, "code": "invalid", "safe_user_message": _t("reminder.err.missing_intent", lang)}
     try:
         zone = reminder_store.get_timezone(user_id)
         current = datetime.fromtimestamp(reminder_store.clock(), timezone.utc)
@@ -2521,10 +2563,10 @@ def _tool_schedule_reminder(args: dict) -> dict:
         spec = ReminderSpec(due, task, zone)
         reminder_id = reminder_store.create(chat_id, user_id, spec, recipient_name=str(ctx.get("recipient_name") or ""))
     except ReminderError as exc:
-        return {"ok": False, "code": exc.code, "safe_user_message": str(exc)}
+        return {"ok": False, "code": exc.code, "safe_user_message": reminder_error_text(exc, lang)}
     except Exception:
         logger.exception("Failed to persist a reminder from the model tool")
-        return {"ok": False, "code": "storage", "safe_user_message": "نتونستم یادآور را ذخیره کنم؛ لطفاً دوباره امتحان کن."}
+        return {"ok": False, "code": "storage", "safe_user_message": _t("reminder.err.storage", lang)}
     return {"ok": True, "id": reminder_id, "task": spec.text,
             "due_utc": int(spec.due_utc.timestamp()), "timezone": spec.timezone}
 
@@ -2719,6 +2761,7 @@ def ask_model(
         return ask_gemini(
             model or config.model,
             messages,
+            lang=user_language(user_id=owner_user_id),
             owner_user_id=owner_user_id,
             file_context=file_context,
             extra_context=extra_context,
@@ -2743,6 +2786,7 @@ def ask_model(
             current_user_text=current_user_text,
             require_search_evidence=require_search_evidence,
             max_rounds=max(1, AGENT_MAX_ROUNDS),
+            lang=user_language(user_id=owner_user_id),
         )
     except ProviderError as exc:
         raise GeminiAPIError(str(exc), exc.status_code) from exc
@@ -2758,6 +2802,7 @@ def ask_gemini(
     allow_meme_tool: bool = True,
     current_user_text: Optional[str] = None,
     require_search_evidence: bool = False,
+    lang: Optional[str] = None,
 ) -> tuple[str, Optional[dict], list[dict]]:
     """Run one bounded Aura agent task using Gemini function calling.
 
@@ -2817,10 +2862,7 @@ def ask_gemini(
         no_retrieved_evidence = searched and not has_any_web_evidence(state.events)
         if no_required_search or no_retrieved_evidence:
             logger.warning("Web evidence unavailable; refusing an unverified answer")
-            return (
-                "نتونستم اطلاعات به‌روز و منبع قابل بررسی برای این سؤال پیدا کنم؛ "
-                "فعلاً نمی‌تونم جواب مطمئنی بدم. لطفاً بعداً دوباره امتحان کن."
-            )
+            return _t("web.no_evidence", lang)
         return content
 
     def record_usage(response) -> None:
@@ -3722,7 +3764,8 @@ def _identity_challenge_for_turn(text: str, replied_to) -> str:
     return target if approval and is_identity_override_attempt(target) else ""
 
 
-async def _ensure_identity_boundary(model: str, messages: list[dict], text: str, answer: str) -> str:
+async def _ensure_identity_boundary(model: str, messages: list[dict], text: str, answer: str,
+                                   *, lang: Optional[str] = None) -> str:
     if not is_identity_override_attempt(text) or identity_answer_keeps_boundary(text, answer):
         return answer
     logger.warning("Regenerating a response that accepted an imposed Aura identity")
@@ -3739,12 +3782,12 @@ async def _ensure_identity_boundary(model: str, messages: list[dict], text: str,
     except Exception:
         logger.warning("Identity-boundary wording unavailable", exc_info=True)
     if re.search(r"(?:خدمتکار|نوکر|کنیز|برده|maid|servant|slave)", text, re.I):
-        return "نه، من ائورام؛ خدمتکار کسی هم نیستم."
+        return _t("identity.refusal.servant", lang)
     if re.search(r"(?:رئیس|رییس|boss)", text, re.I):
-        return "نه، من ائورام؛ قرار نیست کسی رئیس من باشه."
+        return _t("identity.refusal.boss", lang)
     if re.search(r"[آ-ی]", text):
-        return "نه، من ائورام؛ اسمم رو عوض نمی‌کنم."
-    return "No, I'm Aura, and that isn't my identity."
+        return _t("identity.refusal.name", lang)
+    return _t("identity.refusal.generic", lang)
 
 
 async def send_long_message(update: Update, text: str) -> None:
@@ -3816,25 +3859,7 @@ async def start_command(
     model = get_user_model(user_id)
 
     await update.message.reply_text(
-        f"سلام 👋\n\n"
-        f"من {BOT_NAME} هستم؛ دستیار هوش مصنوعی شخصی تو.\n\n"
-        f"مدل فعلی: {model}\n\n"
-        f"می‌تونی همین‌جا باهام گفتگو کنی، سؤال بپرسی، لینک عمومی یوتیوب بدی تا ویدیو رو ببینم و تحلیل کنم، از وب اطلاعات به‌روز بگیری و چیزهایی رو که می‌خوای به خاطر بسپارم.\n\n"
-        f"دستورات:\n"
-        f"/new — شروع گفتگوی جدید\n"
-        f"/model — نمایش مدل فعلی\n"
-        f"/model <name> — تغییر مدل Gemini\n"
-        f"/models — نمایش مدل‌های قابل دسترسی\n"
-        f"/stats — آمار گفتگو و حافظه\n"
-        f"/memory — نمایش حافظه بلندمدت\n"
-        f"/remember <text> — ذخیره در حافظه\n"
-        f"/forget <text> — حذف از حافظه\n"
-        f"/image <prompt> — ساخت عکس (یا ادیت عکسی که روی آن ریپلای می‌کنی)\n"
-        f"/remind <زمان> <متن> — ثبت یادآور یک‌باره\n"
-        f"/reminders — فهرست یادآورها\n"
-        f"/cancelreminder <id> — لغو یادآور\n"
-        f"/timezone [Asia/Tehran] — نمایش یا تغییر منطقهٔ زمانی یادآور\n"
-        f"/whoami — نمایش Telegram ID و وضعیت سازنده"
+        tr("start.body", update, name=BOT_NAME, model=model)
     )
 
 
@@ -3882,6 +3907,9 @@ def _reminder_runtime_context(update: Update, text: str, pending: Optional[dict]
         "chat_id": update.effective_chat.id,
         "user_id": update.effective_user.id,
         "recipient_name": user_display_name(update),
+        # Lets the tool answer in the caller's language without importing the
+        # Telegram update into the tool layer.
+        "lang": user_language(update),
         "sources": sources,
         "explicit": bool(pending_applies or is_reminder_request(text) or broader_request),
         "awaiting_time": bool(pending_applies and pending.get("waiting") == "missing_time"),
@@ -3996,12 +4024,12 @@ async def _confirm_reminder(update: Update, reminder_id: int, original_text: str
     key = _reminder_key(update)
     row = reminder_store.get_owned(key[0], key[1], reminder_id)
     if not row:
-        await _safe_reply_text(update, "نتونستم وضعیت یادآور رو تأیید کنم؛ لطفاً /reminders رو بررسی کن.")
+        await _safe_reply_text(update, tr("reminder.confirm.unavailable", update))
         return
     _pending_reminder_context.pop(key)
     _last_reminder_context.put(key, {"id": reminder_id})
     phrase = await _natural_reminder_phrase(row, "confirmation")
-    answer = phrase or "باشه، یادت می‌ندازم."
+    answer = phrase or tr("reminder.fallback.confirmation", update)
     # The row is already committed; authoritative details remain available via
     # /reminders rather than being appended to every conversational confirmation.
     await _safe_reply_text(update, answer)
@@ -4080,12 +4108,10 @@ async def _schedule_reminder(update: Update, request: str, *, natural: bool = Fa
             # completed in the next turn by the same user in the same chat.
             waiting = exc.code
             _pending_reminder_context.put(key, {"request": request[:12000], "waiting": waiting, "natural": natural})
-            if waiting == "missing_time":
-                answer = "حتماً؛ چه زمانی یادآوری کنم؟ هنوز ثبتش نکردم."
-            elif waiting == "missing_task":
-                answer = "چی رو یادآوری کنم؟ هنوز ثبتش نکردم."
-            else:
-                answer = "زمان یا متن چندپهلو بود؛ لطفاً زمان و کار رو یک‌بار کامل و دقیق بگو. هنوز چیزی ثبت نکردم."
+            answer = tr({
+                "missing_time": "reminder.ask.time",
+                "missing_task": "reminder.ask.task",
+            }.get(waiting, "reminder.ask.complete"), update)
         else:
             _pending_reminder_context.pop(key)
             answer = str(exc)
@@ -4097,20 +4123,20 @@ async def _schedule_reminder(update: Update, request: str, *, natural: bool = Fa
         logger.exception("Failed to prepare a reminder")
         _pending_reminder_context.pop(key)
         _last_reminder_context.put(key, {"state": "not_created"})
-        await _safe_reply_text(update, "نتونستم یادآور را ذخیره کنم؛ لطفاً دوباره امتحان کن.")
+        await _safe_reply_text(update, tr("reminder.err.storage", update))
         return
     try:
         reminder_id = reminder_store.create(key[0], key[1], spec, recipient_name=user_display_name(update))
     except ReminderError as exc:
         _pending_reminder_context.pop(key)
         _last_reminder_context.put(key, {"state": "not_created"})
-        await _safe_reply_text(update, str(exc))
+        await _safe_reply_text(update, reminder_error_message(exc, update))
         return
     except Exception:
         logger.exception("Failed to persist a reminder")
         _pending_reminder_context.pop(key)
         _last_reminder_context.put(key, {"state": "not_created"})
-        await _safe_reply_text(update, "نتونستم یادآور را ذخیره کنم؛ لطفاً دوباره امتحان کن.")
+        await _safe_reply_text(update, tr("reminder.err.storage", update))
         return
     await _confirm_reminder(update, reminder_id, original_text)
 
@@ -4205,7 +4231,7 @@ async def _maybe_reminder_followup(update: Update, text: str) -> bool:
     ):
         _pending_reminder_context.pop(key)
         _last_reminder_context.put(key, {"state": "not_created"})
-        answer = "باشه، این درخواست ناتمام رو ثبت نکردم."
+        answer = tr("reminder.pending.abandoned", update)
         await _safe_reply_text(update, answer)
         _record_reminder_exchange(update, text, answer)
         return True
@@ -4215,24 +4241,24 @@ async def _maybe_reminder_followup(update: Update, text: str) -> bool:
     ):
         reminder_id = last.get("id")
         if not reminder_id:
-            answer = "برای لغو، شمارهٔ یادآور رو از /reminders ببین و با /cancelreminder بفرست."
+            answer = tr("reminder.cancel.usage", update)
         else:
             try:
                 if reminder_store.cancel(key[0], key[1], reminder_id):
-                    answer = f"باشه، یادآور #{reminder_id} لغو شد."
+                    answer = tr("reminder.cancel.done", update, id=reminder_id)
                 else:
                     row = reminder_store.get_owned(key[0], key[1], reminder_id)
                     if row and row["status"] == "sending":
-                        answer = "ارسالش شروع شده و دیگه نمی‌تونم لغوش کنم."
+                        answer = tr("reminder.cancel.sending", update)
                     elif row and row["status"] == "sent":
-                        answer = "این یادآور قبلاً ارسال شده."
+                        answer = tr("reminder.cancel.sent", update)
                     elif row and row["status"] == "cancelled":
-                        answer = f"یادآور #{reminder_id} از قبل لغو شده بود."
+                        answer = tr("reminder.cancel.already_cancelled", update, id=reminder_id)
                     else:
-                        answer = "یادآور فعالی با این مشخصات پیدا نکردم؛ /reminders رو ببین."
+                        answer = tr("reminder.cancel.not_found", update)
             except Exception:
                 logger.exception("Failed to cancel a reminder from follow-up")
-                answer = "نتونستم لغوش کنم؛ وضعیت رو در /reminders بررسی کن."
+                answer = tr("reminder.cancel.error", update)
         await _safe_reply_text(update, answer)
         _record_reminder_exchange(update, text, answer)
         return True
@@ -4240,29 +4266,31 @@ async def _maybe_reminder_followup(update: Update, text: str) -> bool:
     topic_pending = bool(pending and pending.get("topic_current", True))
     if (topic_pending or last or references_reminder) and _is_reminder_status_question(text):
         if (pending and (topic_pending or references_reminder)) or (last and last.get("state") == "not_created"):
-            answer = "نه، این درخواست هنوز ثبت نشده؛ زمان و کار رو مشخص کن تا واقعاً ثبتش کنم."
+            answer = tr("reminder.status.not_created", update)
         elif last and last.get("id"):
             row = reminder_store.get_owned(key[0], key[1], last["id"])
             if not row:
-                answer = "یادآوری با این مشخصات پیدا نکردم؛ لطفاً /reminders رو بررسی کن."
+                answer = tr("reminder.status.missing", update)
             elif row["status"] in {"pending", "sending"}:
-                status = "در انتظار تلاش مجدد" if row["last_error"] else "در حال ارسال" if row["status"] == "sending" else "فعال"
-                answer = (f"آره، یادآور #{row['id']} ثبت شده ({status}): {row['text']}\n"
-                          f"زمان: {format_due(row['due_utc'], row['timezone'])}")
+                status = (tr("reminders.status.retry", update) if row["last_error"]
+                          else tr("reminders.status.sending", update) if row["status"] == "sending"
+                          else tr("reminders.status.active", update))
+                answer = tr("reminder.status.confirmed", update, id=row["id"], status=status,
+                            text=row["text"], due=format_due(row["due_utc"], row["timezone"]))
             elif row["status"] == "sent":
-                answer = f"یادآور #{row['id']} رو قبلاً فرستادم."
+                answer = tr("reminder.status.already_sent", update, id=row["id"])
             elif row["status"] == "failed":
-                answer = f"یادآور #{row['id']} ثبت شده بود، ولی ارسالش ناموفق شد؛ /reminders رو ببین."
+                answer = tr("reminder.status.failed", update, id=row["id"])
             else:
-                answer = f"یادآور #{row['id']} لغو شده و ارسال نمی‌شه."
+                answer = tr("reminder.status.cancelled", update, id=row["id"])
         else:
             rows = reminder_store.list_active(key[0], key[1])
             active = sum(row["status"] in {"pending", "sending"} for row in rows)
             failed = sum(row["status"] == "failed" for row in rows)
             if not rows:
-                answer = "الان در این گفتگو یادآور فعالی نداری؛ /reminders هم وضعیت رو نشون می‌ده."
+                answer = tr("reminder.status.none", update)
             else:
-                answer = f"الان در این گفتگو {active} یادآور فعال و {failed} ارسال ناموفق داری؛ جزئیات: /reminders"
+                answer = tr("reminder.status.summary", update, active=active, failed=failed)
         await _safe_reply_text(update, answer)
         _record_reminder_exchange(update, text, answer)
         return True
@@ -4275,7 +4303,7 @@ async def _maybe_reminder_followup(update: Update, text: str) -> bool:
     elif waiting == "missing_task" and not time_reply and _looks_like_reminder_task_answer(text):
         combined = f"{pending['request']} {text}"
     elif waiting == "ambiguous_time" and time_reply:
-        await _safe_reply_text(update, "برای اینکه اشتباه نکنم، زمان و متن یادآوری رو با هم دوباره بگو؛ هنوز ثبت نشده.")
+        await _safe_reply_text(update, tr("reminder.ambiguous.retry", update))
         return True
     else:
         return False
@@ -4284,7 +4312,7 @@ async def _maybe_reminder_followup(update: Update, text: str) -> bool:
         if result and result.get("ok") is True:
             await _confirm_reminder(update, int(result["id"]), text)
         else:
-            answer = str((result or {}).get("safe_user_message") or "زمان و متن یادآوری رو با هم واضح بگو؛ هنوز چیزی ثبت نکردم.")
+            answer = str((result or {}).get("safe_user_message") or tr("reminder.retry.clarify", update))
             await _safe_reply_text(update, answer)
             _record_reminder_exchange(update, text, answer)
         return True
@@ -4295,12 +4323,7 @@ async def _maybe_reminder_followup(update: Update, text: str) -> bool:
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = list(getattr(context, "args", None) or [])
     if not args:
-        await _safe_reply_text(
-            update,
-            "زمان و متن یادآوری را بفرست؛ مثلاً:\n"
-            "/remind in 10m آب بخور\n/remind 2026-11-01 09:30 جلسه\n"
-            "تاریخ به میلادی است. منطقهٔ زمانی: /timezone",
-        )
+        await _safe_reply_text(update, tr("remind.usage", update))
         return
     await _schedule_reminder(update, " ".join(args))
 
@@ -4315,19 +4338,19 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     else:
         _last_reminder_context.put(key, {"state": "list_checked"})
     if not rows:
-        await _safe_reply_text(update, "در این گفتگو یادآور فعالی نداری.")
+        await _safe_reply_text(update, tr("reminders.none", update))
         return
-    header = "⏰ یادآورهای این گفتگو:"
+    header = tr("reminders.header", update)
     chunk = header
     for row in rows:
         if row["status"] == "failed":
-            status = "ارسال ناموفق؛ دوباره ثبت کن یا لغوش کن"
+            status = tr("reminders.status.failed", update)
         elif row["status"] == "sending":
-            status = "در حال ارسال"
+            status = tr("reminders.status.sending", update)
         elif row["last_error"]:
-            status = "در انتظار تلاش مجدد"
+            status = tr("reminders.status.retry", update)
         else:
-            status = "فعال"
+            status = tr("reminders.status.active", update)
         item = f"\n\n#{row['id']} — {format_due(row['due_utc'], row['timezone'])}\n{row['text']}\n{status}"
         # Send stored reminder text literally, and split only between reminders.
         if len((chunk + item).encode("utf-16-le")) // 2 > 3500:
@@ -4346,13 +4369,13 @@ async def cancel_reminder_command(update: Update, context: ContextTypes.DEFAULT_
     except (TypeError, ValueError):
         reminder_id = 0
     if not 0 < reminder_id <= 2**63 - 1:
-        await _safe_reply_text(update, "شمارهٔ یادآور را بفرست؛ مثلاً /cancelreminder 12")
+        await _safe_reply_text(update, tr("cancelreminder.usage", update))
         return
     if reminder_store.cancel(update.effective_chat.id, update.effective_user.id, reminder_id):
         _last_reminder_context.put(_reminder_key(update), {"id": reminder_id})
-        await _safe_reply_text(update, f"یادآور #{reminder_id} لغو شد.")
+        await _safe_reply_text(update, tr("cancelreminder.cancelled", update, id=reminder_id))
     else:
-        await _safe_reply_text(update, "یادآور فعالی با این شماره در این گفتگو پیدا نشد یا ارسالش شروع شده است.")
+        await _safe_reply_text(update, tr("cancelreminder.not_found", update))
 
 
 async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4361,17 +4384,45 @@ async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     args = list(getattr(context, "args", None) or [])
     if not args:
         zone = reminder_store.get_timezone(update.effective_user.id)
-        await _safe_reply_text(update, f"منطقهٔ زمانی یادآورها: {zone}\nتغییر: /timezone Europe/Berlin")
+        await _safe_reply_text(update, tr("timezone.current", update, zone=zone))
         return
     if len(args) != 1:
-        await _safe_reply_text(update, "یک نام منطقهٔ زمانی بفرست؛ مثلاً /timezone Asia/Tehran")
+        await _safe_reply_text(update, tr("timezone.usage", update))
         return
     try:
         zone = reminder_store.set_timezone(update.effective_user.id, args[0])
     except ReminderError as exc:
-        await _safe_reply_text(update, str(exc))
+        await _safe_reply_text(update, reminder_error_message(exc, update))
         return
-    await _safe_reply_text(update, f"منطقهٔ زمانی یادآورهای جدید: {zone}\nزمان یادآورهای قبلی تغییر نمی‌کند.")
+    await _safe_reply_text(update, tr("timezone.updated", update, zone=zone))
+
+
+async def language_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Show or change the interface language for this user."""
+    if not update.effective_user or not update.message:
+        return
+
+    args = list(getattr(context, "args", None) or [])
+    if not args:
+        current = user_language(update)
+        await update.message.reply_text(
+            tr("language.current", update, name=i18n.LANGUAGE_NAMES.get(current, current))
+        )
+        return
+
+    if len(args) != 1 or not i18n.is_language_name(args[0]):
+        await update.message.reply_text(tr("language.invalid", update))
+        return
+
+    code = i18n.normalize_language(args[0])
+    LANGUAGE_STORE.set(update.effective_user.id, code)
+    # Reply in the language that was just selected.
+    await update.message.reply_text(
+        _t("language.changed", code, name=i18n.LANGUAGE_NAMES.get(code, code))
+    )
 
 
 async def new_command(
@@ -4386,7 +4437,7 @@ async def new_command(
         _weather_choice_context.discard_chat(update.effective_chat.id)
         _pending_reminder_context.discard_chat(update.effective_chat.id)
         _last_reminder_context.discard_chat(update.effective_chat.id)
-    await update.message.reply_text("🧹 تاریخچه مکالمه پاک شد. حافظه بلندمدت دست‌نخورده باقی ماند.")
+    await update.message.reply_text(tr("new.done", update))
 
 
 async def whoami_command(
@@ -4397,13 +4448,10 @@ async def whoami_command(
         return
 
     user = update.effective_user
-    if is_founder(update):
-        status = "تأیید شد؛ Aura تو را به‌عنوان سازنده و صاحب اصلی خودش می‌شناسد."
-    else:
-        status = "این حساب به‌عنوان سازنده ثبت نشده است."
+    status = tr("whoami.founder" if is_founder(update) else "whoami.not_founder", update)
 
     await update.message.reply_text(
-        f"🆔 Telegram ID: {user.id}\n{status}"
+        tr("whoami.body", update, id=user.id, status=status)
     )
 
 
@@ -4420,22 +4468,23 @@ async def model_command(
     if not args:
         if configured_provider() == providers.GEMINI:
             current_model = get_user_model(history_id)
-            hint = "برای تغییر:\n/model model-name"
+            hint = tr("model.hint.gemini", update)
         else:
             current_model = default_model()
-            hint = "این provider مدل را برای همهٔ چت‌ها تنظیم می‌کند:\n/admin set openai_model <name>"
-        await update.message.reply_text(
-            f"🤖 Provider: {configured_provider()}\nمدل فعلی:\n{current_model}\n\n{hint}"
-        )
+            hint = tr("model.hint.openai", update)
+        await update.message.reply_text(tr(
+            "model.current", update,
+            provider=configured_provider(), model=current_model, hint=hint,
+        ))
         return
 
     if len(args) != 1:
-        await update.message.reply_text("استفاده صحیح:\n/model model-name")
+        await update.message.reply_text(tr("model.usage", update))
         return
 
     new_model = args[0].strip()
     if not new_model:
-        await update.message.reply_text("نام مدل خالی است.")
+        await update.message.reply_text(tr("model.empty", update))
         return
 
     if configured_provider() != providers.GEMINI:
@@ -4443,36 +4492,32 @@ async def model_command(
         # admin may change it and it applies to every chat.
         actor = update.effective_user.id if update.effective_user else None
         if not ADMIN_ACCESS.allows(actor):
-            await update.message.reply_text(
-                "تغییر مدل در این حالت فقط توسط مدیر بات انجام می‌شود."
-            )
+            await update.message.reply_text(tr("model.admin_only", update))
             return
         try:
             SETTINGS.set("openai_model", new_model, actor=actor)
         except SettingError as exc:
             await update.message.reply_text(f"❌ {exc}")
             return
-        await update.message.reply_text(f"✅ مدل تغییر کرد به:\n{SETTINGS.get('openai_model')}")
+        await update.message.reply_text(
+            tr("model.changed", update, model=SETTINGS.get("openai_model"))
+        )
         return
 
-    await update.message.reply_text(
-        "🔎 دارم دسترسی مدل رو بررسی می‌کنم..."
-    )
+    await update.message.reply_text(tr("model.checking", update))
 
     try:
         exists = await asyncio.to_thread(model_exists, new_model)
     except GeminiAPIError as exc:
-        await _safe_reply_text(update, classify_gemini_error(exc.status_code, str(exc)).message)
+        await _safe_reply_text(update, classify_gemini_error(exc.status_code, str(exc), user_language(update)).message)
         return
 
     if not exists:
-        await update.message.reply_text(
-            "❌ این مدل در لیست مدل‌های قابل دسترسی API Key شما پیدا نشد."
-        )
+        await update.message.reply_text(tr("model.not_found", update))
         return
 
     set_user_model(history_id, new_model)
-    await update.message.reply_text(f"✅ مدل تغییر کرد به:\n{new_model}")
+    await update.message.reply_text(tr("model.changed", update, model=new_model))
 
 
 async def models_command(
@@ -4482,14 +4527,12 @@ async def models_command(
     if not update.message:
         return
 
-    await update.message.reply_text(
-        "🔎 در حال دریافت مدل‌های قابل دسترسی..."
-    )
+    await update.message.reply_text(tr("models.fetching", update))
 
     try:
         models = await asyncio.to_thread(get_available_models)
     except GeminiAPIError as exc:
-        await _safe_reply_text(update, classify_gemini_error(exc.status_code, str(exc)).message)
+        await _safe_reply_text(update, classify_gemini_error(exc.status_code, str(exc), user_language(update)).message)
         return
 
     model_names = sorted(
@@ -4501,13 +4544,11 @@ async def models_command(
     )
 
     if not model_names:
-        await update.message.reply_text(
-            "هیچ مدلی از API دریافت نشد."
-        )
+        await update.message.reply_text(tr("models.empty", update))
         return
 
     lines = [
-        f"🤖 مدل‌های قابل دسترسی: {len(model_names)}",
+        tr("models.header", update, count=len(model_names)),
         "",
         *[f"• {name}" for name in model_names],
     ]
@@ -4519,9 +4560,9 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     memories = get_memory_list(update.effective_user.id)
     if not memories:
-        await update.message.reply_text("🧠 هنوز حافظه بلندمدتی ذخیره نشده.")
+        await update.message.reply_text(tr("memory.empty", update))
         return
-    lines = ["🧠 حافظه بلندمدت Aura", ""]
+    lines = [tr("memory.header", update), ""]
     for i, item in enumerate(memories, 1):
         lines.append(f"{i}. [{item['memory_type']}] {item['content']}")
     await send_long_message(update, "\n".join(lines))
@@ -4532,10 +4573,10 @@ async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     content = " ".join(context.args).strip()
     if not content:
-        await update.message.reply_text("استفاده: /remember چیزی که می‌خواهی یادم بماند")
+        await update.message.reply_text(tr("remember.usage", update))
         return
     save_memory(update.effective_user.id, "explicit", content, 5, 1.0)
-    await update.message.reply_text("🧠 ذخیره شد. این مورد جزو حافظه بلندمدت Aura است.")
+    await update.message.reply_text(tr("remember.saved", update))
 
 
 async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4543,13 +4584,13 @@ async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     query = " ".join(context.args).strip()
     if not query:
-        await update.message.reply_text("استفاده: /forget بخشی از موردی که می‌خواهی فراموش کنم")
+        await update.message.reply_text(tr("forget.usage", update))
         return
     count = delete_memory(update.effective_user.id, query)
     if count:
-        await update.message.reply_text(f"🧹 {count} مورد از حافظه بلندمدت حذف شد.")
+        await update.message.reply_text(tr("forget.removed", update, count=count))
     else:
-        await update.message.reply_text("چیزی مطابق این عبارت در حافظه بلندمدت پیدا نکردم.")
+        await update.message.reply_text(tr("forget.not_found", update))
 
 
 async def stats_command(
@@ -4560,14 +4601,16 @@ async def stats_command(
         return
 
     user_id = conversation_key(update)
-    await update.message.reply_text(
-        f"📊 آمار گفتگو\n\n"
-        f"مدل: {get_user_model(user_id)}\n"
-        f"تعداد پیام‌های ذخیره‌شده: {get_message_count(conversation_key(update))}\n"
-        f"پیام‌های اخیر در context: {CONTEXT_RECENT_MESSAGES} | آستانه فشرده‌سازی: {CONTEXT_COMPACT_THRESHOLD}\n"
-        f"جستجوی وب امروز: {get_web_search_usage()}/{WEB_SEARCH_DAILY_LIMIT}\n"
-        f"تعداد حافظه‌های بلندمدت: {len(get_memory_list(user_id, 1000))}"
-    )
+    await update.message.reply_text(tr(
+        "stats.body", update,
+        model=get_user_model(user_id),
+        messages=get_message_count(conversation_key(update)),
+        recent=CONTEXT_RECENT_MESSAGES,
+        threshold=CONTEXT_COMPACT_THRESHOLD,
+        search_used=get_web_search_usage(),
+        search_limit=WEB_SEARCH_DAILY_LIMIT,
+        memories=len(get_memory_list(user_id, 1000)),
+    ))
 
 
 # ---------- Group access control ----------
@@ -4652,7 +4695,7 @@ async def settings_command(
     if not update.message:
         return
     if not is_founder(update):
-        await update.message.reply_text("Access denied.")
+        await update.message.reply_text(tr("settings.denied", update))
         return
 
     args = list(context.args or [])
@@ -4660,16 +4703,12 @@ async def settings_command(
 
     if action in {"add", "remove"}:
         if len(args) < 2:
-            await update.message.reply_text(
-                "فرمت درست:\n/settings add <chat_id>\n/settings remove <chat_id>"
-            )
+            await update.message.reply_text(tr("settings.usage", update))
             return
         try:
             chat_id = int(args[1])
         except ValueError:
-            await update.message.reply_text(
-                "Chat ID باید یک عدد باشد (مثلاً -1001234567890)."
-            )
+            await update.message.reply_text(tr("settings.chat_id_invalid", update))
             return
         if action == "add":
             title = ""
@@ -4682,35 +4721,35 @@ async def settings_command(
                 pass
             add_allowed_group(chat_id, title)
             shown = f"{title} — {chat_id}" if title else str(chat_id)
-            await update.message.reply_text(f"✅ گروه به لیست مجاز اضافه شد:\n{shown}")
+            await update.message.reply_text(tr("settings.group_added", update, group=shown))
         else:
             if remove_allowed_group(chat_id):
-                await update.message.reply_text(f"🗑 گروه از لیست مجاز حذف شد: {chat_id}")
+                await update.message.reply_text(tr("settings.group_removed", update, chat_id=chat_id))
             else:
-                await update.message.reply_text(f"این Chat ID در لیست مجاز نبود: {chat_id}")
+                await update.message.reply_text(tr("settings.group_not_found", update, chat_id=chat_id))
         return
 
     groups = get_allowed_groups()
     lines = [
-        "⚙️ تنظیمات کنترل دسترسی",
+        tr("settings.title", update),
         "",
-        "وضعیت: فعال",
-        "• چت خصوصی: برای همه آزاد",
-        "• گروه‌ها: فقط گروه‌های داخل لیست مجاز (بقیه سکوت کامل)",
-        f"• تعداد گروه‌های مجاز: {len(groups)}",
+        tr("settings.status", update),
+        tr("settings.private", update),
+        tr("settings.groups", update),
+        tr("settings.group_count", update, count=len(groups)),
     ]
     if groups:
         lines.append("")
-        lines.append("گروه‌های مجاز:")
+        lines.append(tr("settings.allowed_header", update))
         for row in groups:
-            title = row["title"] or "بدون عنوان"
+            title = row["title"] or tr("settings.untitled", update)
             lines.append(f"• {title} — {row['chat_id']}")
     lines += [
         "",
-        "دستورها:",
-        "/settings — نمایش همین وضعیت و لیست",
-        "/settings add <chat_id> — افزودن گروه",
-        "/settings remove <chat_id> — حذف گروه",
+        tr("settings.commands", update),
+        tr("settings.cmd_show", update),
+        tr("settings.cmd_add", update),
+        tr("settings.cmd_remove", update),
     ]
     await update.message.reply_text("\n".join(lines))
 
@@ -4846,17 +4885,18 @@ def _looks_like_recent_image_followup(text: str) -> bool:
 
 async def _download_inline_file(
     file_id: str, context: ContextTypes.DEFAULT_TYPE, *, known_size: int, limit: int,
+    lang: Optional[str] = None,
 ) -> bytes:
     if known_size and known_size > limit:
-        raise MediaInputError(f"رسانه بزرگ‌تر از حد مجاز است. حداکثر: {limit // (1024 * 1024)}MB")
+        raise MediaInputError(_t("media.too_large", lang, limit=limit // (1024 * 1024)))
     tg_file = await context.bot.get_file(file_id)
     buf = io.BytesIO()
     await tg_file.download_to_memory(out=buf)
     raw = buf.getvalue()
     if len(raw) > limit:
-        raise MediaInputError(f"رسانه بزرگ‌تر از حد مجاز است. حداکثر: {limit // (1024 * 1024)}MB")
+        raise MediaInputError(_t("media.too_large", lang, limit=limit // (1024 * 1024)))
     if not raw:
-        raise MediaInputError("رسانه خالی است یا قابل دریافت نیست.")
+        raise MediaInputError(_t("media.empty", lang))
     return raw
 
 
@@ -4870,6 +4910,7 @@ async def download_telegram_photo(
     photo = update.message.photo[-1]
     raw = await _download_inline_file(
         photo.file_id, context, known_size=int(getattr(photo, "file_size", 0) or 0), limit=MAX_IMAGE_BYTES,
+        lang=user_language(update),
     )
     # Telegram PhotoSize objects are delivered as JPEG-compatible photo files.
     return raw, "image/jpeg", (update.message.caption or "").strip()
@@ -4884,7 +4925,7 @@ async def download_telegram_document(update: Update, context: ContextTypes.DEFAU
     document = update.message.document
     size = int(document.file_size or 0)
     if size and size > MAX_DOCUMENT_BYTES:
-        raise MediaInputError(f"فایل بزرگ‌تر از حد مجاز است. حداکثر: {MAX_DOCUMENT_BYTES // (1024 * 1024)}MB")
+        raise MediaInputError(tr("media.file_too_large", update, limit=MAX_DOCUMENT_BYTES // (1024 * 1024)))
     tg_file = await context.bot.get_file(document.file_id)
     suffix = _file_extension(document.file_name or "") or ""
     fd, temp_path = tempfile.mkstemp(prefix="aura_file_", suffix=suffix)
@@ -4894,7 +4935,7 @@ async def download_telegram_document(update: Update, context: ContextTypes.DEFAU
         actual_size = os.path.getsize(temp_path)
         if actual_size > MAX_DOCUMENT_BYTES:
             os.remove(temp_path)
-            raise MediaInputError(f"فایل بزرگ‌تر از حد مجاز است. حداکثر: {MAX_DOCUMENT_BYTES // (1024 * 1024)}MB")
+            raise MediaInputError(tr("media.file_too_large", update, limit=MAX_DOCUMENT_BYTES // (1024 * 1024)))
     except Exception:
         try:
             os.remove(temp_path)
@@ -4977,6 +5018,8 @@ def build_video_messages(
 async def download_replied_media(
     reply_message,
     context: ContextTypes.DEFAULT_TYPE,
+    *,
+    lang: Optional[str] = None,
 ) -> tuple[bytes, str, str]:
     """Download the replied-to Telegram media for inline Gemini analysis."""
     if reply_message is None:
@@ -5017,16 +5060,17 @@ async def download_replied_media(
         mime_type = str(getattr(media, "mime_type", None) or "video/mp4")
         label = "animation"
     else:
-        raise GeminiAPIError("پیام موردنظر رسانه قابل تحلیل ندارد.")
+        raise GeminiAPIError(_t("media.no_analysable_part", lang))
 
     mime_type = _normal_media_mime(mime_type)
     if label in {"video", "animation"} and mime_type not in _INLINE_VIDEO_MIMES:
-        raise MediaInputError("این فرمت ویدیو برای تحلیل پشتیبانی نمی‌شود؛ لطفاً MP4 یا WebM بفرست.")
+        raise MediaInputError(_t("media.video_unsupported", lang))
     if label in {"audio", "voice message"} and mime_type not in _INLINE_AUDIO_MIMES:
-        raise MediaInputError("این فرمت صدا برای تحلیل پشتیبانی نمی‌شود؛ لطفاً OGG یا MP3 بفرست.")
+        raise MediaInputError(_t("media.audio_unsupported", lang))
     limit = MAX_IMAGE_BYTES if mime_type in _INLINE_IMAGE_MIMES else MAX_INLINE_MEDIA_BYTES
     raw = await _download_inline_file(
         media.file_id, context, known_size=int(getattr(media, "file_size", 0) or 0), limit=limit,
+        lang=lang,
     )
     return raw, mime_type, label
 
@@ -5141,10 +5185,7 @@ async def _deliver_generated_images(update: Update, images: list) -> None:
         if not sent:
             failed += 1
     if failed:
-        await _safe_reply_text(
-            update,
-            "❌ تصویر یا میم آماده شد، اما تلگرام نتوانست آن را ارسال کند. لطفاً دوباره امتحان کن.",
-        )
+        await _safe_reply_text(update, tr("image.delivery_failed", update))
 
 
 def _prepare_pollinations_prompt(model: str, text: str, *, mode: str) -> str:
@@ -5180,14 +5221,9 @@ def _prepare_pollinations_prompt(model: str, text: str, *, mode: str) -> str:
     return original[:POLLINATIONS_MAX_PROMPT_CHARS]
 
 
-_SVG_OFFER_TEXT = (
-    "اگر بخوای، همین تصویر رو می‌تونم به‌صورت گرافیکی و برداری (SVG) برات بسازم؛ "
-    "بگو تا انجامش بدم."
-)
-
-
-def _svg_fallback_hint(error: Optional[PollinationsError] = None) -> str:
-    """Return a Persian SVG offer when the photo generator is unavailable.
+def _svg_fallback_hint(error: Optional[PollinationsError] = None,
+                       lang: Optional[str] = None) -> str:
+    """Return the SVG offer, in the user's language, when the photo generator is unavailable.
 
     Content-policy rejections never get an offer: Aura must not suggest a way
     around a safety filter. Everything else (quota, credits, access, outage)
@@ -5201,7 +5237,7 @@ def _svg_fallback_hint(error: Optional[PollinationsError] = None) -> str:
             return ""
         if error.status_code is not None and error.status_code not in {401, 402, 403, 429, 500, 502, 503, 504}:
             return ""
-    return "\n\n" + _SVG_OFFER_TEXT
+    return "\n\n" + _t("image.svg_offer", lang)
 
 
 async def _run_image_generation(
@@ -5234,11 +5270,11 @@ async def _run_image_generation(
             "Image generation failed | status=%s code=%s model=%s | %s",
             exc.status_code, exc.code or "-", pollinations_client.image_model, exc,
         )
-        await _safe_reply_text(update, exc.user_message + _svg_fallback_hint(exc))
+        await _safe_reply_text(update, exc.user_message + _svg_fallback_hint(exc, user_language(update)))
         return
     except Exception:
         logger.exception("Unexpected image generation failure")
-        await _safe_reply_text(update, generic_user_error().message)
+        await _safe_reply_text(update, generic_user_error(user_language(update)).message)
         return
     finally:
         stop_action.set()
@@ -5256,7 +5292,7 @@ async def _run_image_generation(
             history_id, image.model, len(image.data),
         )
     else:
-        await _safe_reply_text(update, "❌ عکس ساخته شد ولی تلگرام نتوانست آن را ارسال کند.")
+        await _safe_reply_text(update, tr("image.generated_but_failed", update))
 
 
 def _reply_contains_editable_image(reply_message) -> bool:
@@ -5284,7 +5320,7 @@ async def _run_image_edit(
         return
     if needs_edit_details(prompt):
         await update.message.reply_text(
-            "چه تغییری روی عکس اعمال کنم؟ مثلاً «آسمان را بنفش کن» یا «این را کارتونی کن»."
+            tr("image.edit_prompt", update)
         )
         return
     history_id = conversation_key(update)
@@ -5298,9 +5334,11 @@ async def _run_image_edit(
         if source_message is None:
             image_bytes, mime_type, _ = await download_telegram_photo(update, context)
         else:
-            image_bytes, mime_type, _ = await download_replied_media(source_message, context)
+            image_bytes, mime_type, _ = await download_replied_media(
+                source_message, context, lang=user_language(update),
+            )
             if not str(mime_type or "").startswith("image/"):
-                await _safe_reply_text(update, "برای ادیت، باید روی یک عکس ریپلای کنی یا خود عکس را بفرستی.")
+                await _safe_reply_text(update, tr("image.edit_needs_photo", update))
                 return
         english_prompt = await asyncio.to_thread(
             _prepare_pollinations_prompt, model, prompt, mode="edit"
@@ -5325,7 +5363,7 @@ async def _run_image_edit(
         return
     except Exception:
         logger.exception("Unexpected image edit failure")
-        await _safe_reply_text(update, generic_user_error().message)
+        await _safe_reply_text(update, generic_user_error(user_language(update)).message)
         return
     finally:
         stop_action.set()
@@ -5351,7 +5389,7 @@ async def _run_image_edit(
             history_id, image.model, len(image.data),
         )
     else:
-        await _safe_reply_text(update, "❌ عکس ادیت شد ولی تلگرام نتوانست آن را ارسال کند.")
+        await _safe_reply_text(update, tr("image.edited_but_failed", update))
 
 
 async def _maybe_handle_current_photo_edit(
@@ -5367,7 +5405,7 @@ async def _maybe_handle_current_photo_edit(
     if command_prompt is not None:
         if not command_prompt:
             await update.message.reply_text(
-                "بگو چه تغییری روی عکس اعمال کنم؛ مثلاً: «آسمان را بنفش کن»."
+                tr("image.edit_prompt", update)
             )
             return True
         await _run_image_edit(
@@ -5391,16 +5429,8 @@ async def image_command(
     if not update.message:
         return
     if not pollinations_client.is_configured:
-        note = (
-            "\n\nولی می‌تونم تصویر رو به‌صورت گرافیکی و برداری (SVG) برات بسازم؛ "
-            "فقط توضیح بده چه چیزی می‌خوای."
-            if SVG_IMAGE_AVAILABLE
-            else ""
-        )
-        await update.message.reply_text(
-            "قابلیت ساخت عکس فعلاً روی Aura فعال نیست. اگر کلید سرویس تصویر تنظیم شود، از همین دستور می‌توانی استفاده کنی."
-            + note
-        )
+        note = tr("image.svg_only_hint", update) if SVG_IMAGE_AVAILABLE else ""
+        await update.message.reply_text(tr("image.disabled", update) + note)
         return
 
     prompt = " ".join(context.args or []).strip()
@@ -5409,19 +5439,9 @@ async def image_command(
 
     if not prompt:
         if editable_reply is not None:
-            await update.message.reply_text(
-                "چه تغییری روی این عکس اعمال کنم؟\n"
-                "مثال: <code>/image آسمان را بنفش کن</code>",
-                parse_mode="HTML",
-            )
+            await update.message.reply_text(tr("image.edit_prompt_html", update), parse_mode="HTML")
         else:
-            await update.message.reply_text(
-                "فرمت درست:\n"
-                "<code>/image &lt;توضیح عکس&gt;</code>\n\n"
-                "مثال: <code>/image یک گربه فضانورد در حال نقاشی</code>\n"
-                "برای ادیت، روی یک عکس ریپلای کن و همین دستور را با توضیح تغییر بفرست.",
-                parse_mode="HTML",
-            )
+            await update.message.reply_text(tr("image.usage_html", update), parse_mode="HTML")
         return
 
     if editable_reply is not None:
@@ -5430,16 +5450,9 @@ async def image_command(
         await _run_image_generation(update, context, prompt)
 
 
-BARE_CALL_RESPONSES = (
-    "بله؟",
-    "جان؟",
-    "هوم؟",
-    "این‌جام.",
-    "بگو.",
-    "آره؟",
-    "شنیدم.",
-    "چی شده؟",
-)
+def _bare_call_responses(lang: Optional[str] = None) -> list[str]:
+    """Short acknowledgements for a bare name call, in the user's language."""
+    return [item for item in _t("chat.bare_call", lang).split("|") if item]
 _bare_call_last: dict[tuple[int, int], str] = {}
 
 
@@ -5449,7 +5462,8 @@ async def reply_to_bare_group_call(update: Update) -> None:
     user_id = update.effective_user.id
     key = (chat_id, user_id)
     previous = _bare_call_last.get(key)
-    choices = [x for x in BARE_CALL_RESPONSES if x != previous] or list(BARE_CALL_RESPONSES)
+    responses = _bare_call_responses(user_language(update))
+    choices = [x for x in responses if x != previous] or responses
     answer = random.choice(choices)
     _bare_call_last[key] = answer
     # Keep the state bounded because this is intentionally ephemeral.
@@ -5893,18 +5907,51 @@ async def _send_queued_sticker(update: Update, tag: str, context: ContextTypes.D
         logger.warning("Sticker send failed | chat=%s | tag=%s | %s", chat_id, tag, exc)
 
 
-def _format_selected_weather(data: dict) -> str:
+def _format_selected_weather(data: dict, lang: Optional[str] = None) -> str:
     current = data["current"]
     lines = [
-        f"🌤 {data['location']}: {current['condition']}، {current['temperature_c']}°C "
-        f"(احساس‌شده {current['feels_like_c']}°C)",
+        _t("weather.current_line", lang, location=data["location"], condition=current["condition"],
+           temp=current["temperature_c"], feels=current["feels_like_c"]),
     ]
     for day in data.get("daily", [])[:3]:
-        line = f"{day['date']}: {day['condition']}، {day['temp_min_c']} تا {day['temp_max_c']}°C"
+        line = _t("weather.day_line", lang, date=day["date"], condition=day["condition"],
+                  low=day["temp_min_c"], high=day["temp_max_c"])
         if day.get("precipitation_probability_max") is not None:
-            line += f"، احتمال بارش {day['precipitation_probability_max']}٪"
+            line += _t("weather.precipitation", lang, chance=day["precipitation_probability_max"])
         lines.append(line)
     return "\n".join(lines)
+
+
+def _weather_choices_text(choices, lang: Optional[str] = None) -> str:
+    """Numbered city choices, rendered in the user's language."""
+    labels = []
+    for choice in choices:
+        parts = [getattr(choice, "name", "")]
+        admin1 = getattr(choice, "admin1", "")
+        if admin1 and str(admin1).casefold() != str(parts[0]).casefold():
+            parts.append(str(admin1))
+        country = getattr(choice, "country", "") or getattr(choice, "country_code", "")
+        if country:
+            parts.append(str(country))
+        labels.append(", ".join(part for part in parts if part))
+    lines = [_t("weather.choices.header", lang)]
+    for index, (choice, label) in enumerate(zip(choices, labels), 1):
+        if labels.count(label) > 1:
+            label += f" ({getattr(choice, 'latitude', 0.0):.2f}, {getattr(choice, 'longitude', 0.0):.2f})"
+        lines.append(f"{index}. {label}")
+    lines.append(_t("weather.choices.footer", lang))
+    return "\n".join(lines)
+
+
+def weather_error_message(exc: Exception, lang: Optional[str] = None) -> str:
+    """User-facing weather failure, keyed by the client's stable error code."""
+    code = str(getattr(exc, "code", "") or "")
+    choices = tuple(getattr(exc, "choices", ()) or ())
+    if code == "ambiguous" and choices:
+        return _weather_choices_text(choices, lang)
+    if code and i18n.has_key(f"weather.err.{code}"):
+        return _t(f"weather.err.{code}", lang)
+    return _t("weather.err.unavailable", lang)
 
 
 async def _maybe_handle_weather_choice(update: Update, text: str) -> bool:
@@ -5916,18 +5963,18 @@ async def _maybe_handle_weather_choice(update: Update, text: str) -> bool:
         return False
     index = int(text.strip()) - 1
     if index < 0 or index >= len(choices):
-        await _safe_reply_text(update, f"شماره‌ای بین ۱ و {len(choices)} بفرست.")
+        await _safe_reply_text(update, tr("weather.choose", update, count=len(choices)))
         return True
     try:
         location = ResolvedLocation(**choices[index])
         report = await asyncio.to_thread(weather_client.get_weather_for_location, location)
-        answer = _format_selected_weather(weather_client.format_for_model(report))
+        answer = _format_selected_weather(weather_client.format_for_model(report), user_language(update))
     except WeatherError as exc:
-        await _safe_reply_text(update, exc.user_message)
+        await _safe_reply_text(update, weather_error_message(exc, user_language(update)))
         return True
     except Exception:
         logger.exception("Weather choice failed")
-        await _safe_reply_text(update, "نتونستم هوا رو دریافت کنم؛ لطفاً دوباره امتحان کن.")
+        await _safe_reply_text(update, tr("weather.failed", update))
         return True
     _weather_choice_context.pop(key)
     history_id = conversation_key(update)
@@ -5996,15 +6043,8 @@ async def message_handler(
     # `/image` in a photo caption never reaches CommandHandler (Telegram commands
     # are text-only), so answer it here even when the feature is disabled.
     if image_requested and extract_image_command_prompt(text) is not None and not pollinations_client.is_configured:
-        note = (
-            "\n\nولی می‌تونم تصویر رو به‌صورت گرافیکی و برداری (SVG) برات بسازم؛ "
-            "فقط توضیح بده چه چیزی می‌خوای."
-            if SVG_IMAGE_AVAILABLE
-            else ""
-        )
-        await update.message.reply_text(
-            "قابلیت ساخت عکس فعلاً روی Aura فعال نیست." + note
-        )
+        note = tr("image.svg_only_hint", update) if SVG_IMAGE_AVAILABLE else ""
+        await update.message.reply_text(tr("image.disabled", update) + note)
         return
 
     # Explicit image edits are local, deterministic paths: they must run before
@@ -6074,7 +6114,7 @@ async def message_handler(
 
     if len(text) > MAX_INPUT_CHARS:
         await update.message.reply_text(
-            f"پیام خیلی طولانی است.\nحداکثر طول مجاز: {MAX_INPUT_CHARS} کاراکتر."
+            tr("media.too_long", update, limit=MAX_INPUT_CHARS)
         )
         return
 
@@ -6135,18 +6175,20 @@ async def message_handler(
                 except WeatherError as exc:
                     if exc.code == "ambiguous" and exc.choices:
                         _weather_choice_context.put(image_context_key, [vars(choice) for choice in exc.choices[:5]])
-                    answer = exc.user_message
+                    answer = weather_error_message(exc, user_language(update))
                     add_message(history_id, "user", make_user_message(update, text))
                     add_message(history_id, "assistant", answer)
                     await send_long_message(update, answer)
                     return
                 except Exception:
                     logger.exception("Weather prefetch failed")
-                    await _safe_reply_text(update, "نتونستم هوا رو دریافت کنم؛ لطفاً دوباره امتحان کن.")
+                    await _safe_reply_text(update, tr("weather.failed", update))
                     return
 
         if replied_to and reply_has_media and not image_requested and not document_requested and not media_requested:
-            media_bytes, media_mime, media_label = await download_replied_media(replied_to, context)
+            media_bytes, media_mime, media_label = await download_replied_media(
+                replied_to, context, lang=user_language(update),
+            )
             image_reference = _recent_image_reference(replied_to)
             if image_reference:
                 _recent_image_context.put(image_context_key, image_reference)
@@ -6200,7 +6242,9 @@ async def message_handler(
             request_messages = build_image_messages(history, prompt_text, image_bytes, image_mime)
             saved_user_content = prompt_text + " [image]"
         elif media_requested or (document_requested and inline_document_mime):
-            media_bytes, media_mime, media_label = await download_replied_media(update.message, context)
+            media_bytes, media_mime, media_label = await download_replied_media(
+                update.message, context, lang=user_language(update),
+            )
             image_reference = _recent_image_reference(update.message)
             if image_reference:
                 _recent_image_context.put(image_context_key, image_reference)
@@ -6213,6 +6257,7 @@ async def message_handler(
         elif recent_image:
             image_bytes = await _download_inline_file(
                 recent_image["file_id"], context, known_size=recent_image["file_size"], limit=MAX_IMAGE_BYTES,
+                lang=user_language(update),
             )
             prompt_text = build_message_identity_context(update.message).prompt_block() + "\n" + text
             request_messages = build_image_messages(history, prompt_text, image_bytes, recent_image["mime_type"])
@@ -6226,7 +6271,7 @@ async def message_handler(
             request_messages = build_video_messages(history, prompt_text, active_video_url)
             saved_user_content = make_user_message(update, text)
             logger.info("YouTube video analysis | chat=%s | url=%s", history_id, active_video_url)
-            await update.message.reply_text("🎬 دارم ویدیوی یوتیوب رو بررسی می‌کنم...")
+            await update.message.reply_text(tr("media.checking_video", update))
         else:
             saved_user_content = make_user_message(update, text)
             request_messages = build_request_with_reply_context(
@@ -6440,7 +6485,7 @@ async def message_handler(
                             "request": text[:12000], "waiting": code, "natural": False, "model_only": True,
                         })
                     _last_reminder_context.put(key, {"state": "not_created"})
-                    answer = str(result.get("safe_user_message") or "هنوز یادآوری ثبت نکردم؛ لطفاً زمان و کار رو واضح بگو.")
+                    answer = str(result.get("safe_user_message") or tr("reminder.fallback.nothing", update))
                     await _safe_reply_text(update, answer)
                     _record_reminder_exchange(update, text, answer)
                 return
@@ -6458,21 +6503,22 @@ async def message_handler(
             # The real tool path returns above with the committed row instead.
             logger.warning("Reminder request had no action result | chat=%s", history_id)
             answer = (
-                "هنوز این یادآور ثبت نشده؛ لطفاً زمان و کار رو واضح بگو، "
-                "مثلاً «پنج دقیقه دیگه یادم بنداز آب بخورم»."
+                tr("reminder.needs_details", update)
             )
         elif _unverified_reminder_claim(answer, text):
             logger.warning("Blocked an unverified model reminder promise | chat=%s", history_id)
-            answer = "برای این پیام یادآوری ثبت یا لغو نشده؛ وضعیت واقعی رو با /reminders ببین."
+            answer = tr("reminder.unverified", update)
         else:
             challenge = _identity_challenge_for_turn(text, replied_to)
-            answer = await _ensure_identity_boundary(model, request_messages, challenge, answer)
+            answer = await _ensure_identity_boundary(
+                model, request_messages, challenge, answer, lang=user_language(update),
+            )
         filtered_answer = remove_generated_source_section(answer, user_text=text)
         if filtered_answer != answer:
             # The model wrote a source section on its own. Aura never sends a
             # source list, so if nothing else remains, say so without pointing
             # the user at sources that are not shown.
-            answer = filtered_answer or "جواب مشخصی برای این سؤال پیدا نکردم."
+            answer = filtered_answer or tr("answer.no_clear_result", update)
         answer_without_sticker_markers = _strip_sticker_markers(answer)
         marker_stripped = answer_without_sticker_markers != answer
         answer = answer_without_sticker_markers
@@ -6541,15 +6587,15 @@ async def message_handler(
             "Gemini API error | chat=%s | model=%s | status=%s | %s",
             history_id, model, exc.status_code, exc,
         )
-        user_error = classify_gemini_error(exc.status_code, str(exc))
+        user_error = classify_gemini_error(exc.status_code, str(exc), user_language(update))
         await _safe_reply_text(update, user_error.message)
     except TelegramError as exc:
         logger.error("Telegram error | chat=%s | %s", history_id, exc)
-        user_error = classify_telegram_error(exc.__class__.__name__, str(exc))
+        user_error = classify_telegram_error(exc.__class__.__name__, str(exc), user_language(update))
         await _safe_reply_text(update, user_error.message)
     except Exception:
         logger.exception("Unexpected error while processing chat=%s", history_id)
-        await _safe_reply_text(update, generic_user_error().message)
+        await _safe_reply_text(update, generic_user_error(user_language(update)).message)
     finally:
         logger.info(
             "Message lifecycle completed | request_id=%s chat=%s message=%s latency_ms=%.1f",
@@ -6632,6 +6678,7 @@ async def application_post_init(application: Application) -> None:
         reminder_store, application.bot, poll_seconds=REMINDER_POLL_SECONDS,
         can_send=lambda chat_id: chat_id > 0 or is_group_allowed(chat_id),
         compose_message=lambda row: _natural_reminder_phrase(row, "delivery"),
+        language=lambda row: user_language(user_id=row["user_id"]),
     )
     application.bot_data["reminder_scheduler"] = scheduler
     application.bot_data["reminder_task"] = asyncio.create_task(scheduler.run(), name="reminder-scheduler")
@@ -6707,6 +6754,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("reminders", reminders_command))
     application.add_handler(CommandHandler("cancelreminder", cancel_reminder_command))
     application.add_handler(CommandHandler("timezone", timezone_command))
+    application.add_handler(CommandHandler("language", language_command))
     # Owner/admin panel. The panel enforces its own access rules (founder plus
     # ADMIN_USER_IDS) and works in private chats only.
     application.add_handler(CommandHandler("admin", admin_panel_command))

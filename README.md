@@ -24,6 +24,7 @@ Aura is open source under the [MIT License](LICENSE). Contributions are welcome 
 - Current conditions and 3-day forecast for any city via Open-Meteo (keyless)
 - Real Reddit memes fetched with a keyless API, then commented on from the actual picture
 - Smart sticker sending (model-chosen tags from a personal sticker pack, with cooldowns)
+- Persian and English interfaces, switched per user with `/language`
 - Configurable model and search settings
 - Environment-based secrets and configuration
 
@@ -81,6 +82,7 @@ OPENAI_MODEL=gpt-4o-mini
 ### Optional variables
 
 - `BOT_NAME`
+- `BOT_LANGUAGE`
 - `FOUNDER_USER_ID`
 - `YOU_API_KEY`
 - `WEB_SEARCH_ENABLED`
@@ -202,6 +204,34 @@ Secrets are never echoed back. `/admin show` prints a mask such as
 installed (`pip install -r requirements.txt` installs it). If you rotate
 `AURA_SECRET_KEY`, stored keys become unreadable and must be re-entered —
 environment keys are unaffected.
+
+## Languages
+
+Aura speaks Persian and English. Persian is the default, so an untouched
+deployment behaves exactly as before.
+
+```
+/language            show the current language
+/language en         switch to English
+/language fa         switch back to Persian
+```
+
+The choice is stored per Telegram user (`user_language` table in `bot.db`) and
+applies to commands, errors, reminder confirmations and delivery wordings,
+weather reports and media notices. Precedence is
+**`/language` choice → stored preference → `BOT_LANGUAGE` → `fa`**.
+
+`BOT_LANGUAGE` (or `/admin set bot_language en`) sets the deployment default for
+everyone who has not chosen a language. It is a change to Aura's own voice, not
+to the model: the selected language is written into the system prompt, so Aura
+answers in it instead of guessing from the user's last message. Content the user
+wrote — task text, quotes, names — is never translated.
+
+Translations live in `i18n.py`. Every key carries both languages, and the test
+suite fails on a missing translation, a differing placeholder set, or a Persian
+string passed straight to Telegram instead of through the catalog. To add a
+language: extend `i18n.LANGUAGES`, add the code to `LANGUAGE_NAMES` and fill in
+`CATALOG`; `i18n.missing_translations()` lists what is still empty.
 
 ## Stickers
 

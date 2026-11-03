@@ -25,6 +25,7 @@ Aura is open source under the [MIT License](LICENSE). Contributions are welcome 
 - Real Reddit memes fetched with a keyless API, then commented on from the actual picture
 - Smart sticker sending (model-chosen tags from a personal sticker pack, with cooldowns)
 - Persian and English interfaces, switched per user with `/language`
+- Owner-tunable persona: tone presets and a one-line note, without touching identity rules
 - Configurable model and search settings
 - Environment-based secrets and configuration
 
@@ -84,6 +85,8 @@ OPENAI_MODEL=gpt-4o-mini
 - `BOT_NAME`
 - `BOT_LANGUAGE`
 - `OWNER_NAME`
+- `PERSONA_TONE`
+- `PERSONA_NOTE`
 - `USER_DAILY_TURNS`
 - `USER_DAILY_TOKENS`
 - `FOUNDER_USER_ID`
@@ -228,6 +231,46 @@ The name is a label, not a credential: it never proves who is speaking, grants
 no permissions, and does not change founder verification, which stays tied to
 `FOUNDER_USER_ID`. It is not translated, shortened or replaced by a nickname,
 and a user cannot set it by claiming to be the owner in chat.
+
+## Persona (optional)
+
+Aura's character is part of the code, but the *surface* of it — how warm she is,
+how formal, what she calls you — is a deployment decision, not a code change.
+Two settings cover it, both editable at runtime with `/admin set`:
+
+| Setting | Values | Meaning |
+|---|---|---|
+| `persona_tone` | `balanced` (default), `warm`, `professional`, `playful` | how she sounds |
+| `persona_note` | free text, up to 400 characters | one line from the owner about how she should talk to you |
+
+```bash
+PERSONA_TONE=warm
+PERSONA_NOTE=با من خودمونی حرف بزن و کوتاه جواب بده
+```
+
+or, at runtime:
+
+```text
+/admin set persona_tone professional
+/admin set persona_note call me Sara and skip the small talk
+```
+
+The default (`balanced`, no note) adds **nothing** to the prompt: an
+unconfigured deployment sends exactly the prompt it always sent. Phrasing lives
+in `persona.py`, and the block it produces is explicitly the lowest-priority
+layer — after the identity and personality boundaries — so it can never:
+
+- change who Aura is, her creator, or her relationship to anyone;
+- relax the honesty rules or let her invent facts, memories or capabilities;
+- grant permissions, admin rights or tool access;
+- override the interface language.
+
+The note is the one place where owner-written text reaches the system prompt, so
+it is treated as data: control characters, newlines and block markers are
+stripped, it is capped at 400 characters (and an over-long value is rejected at
+set time rather than silently cut), and the prompt tells the model to read it as
+configuration, not as instructions from the person it is talking to. Persian
+half-spaces (ZWNJ) are preserved.
 
 ## Languages
 

@@ -61,6 +61,8 @@ class SettingSpec:
     env: Optional[str] = None
     secret: bool = False
     restart_hint: bool = False
+    #: Optional cap for free-text settings, enforced when the value is stored.
+    max_length: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"bool", "int", "choice", "text", "url", "secret"}:
@@ -137,6 +139,20 @@ SPECS: tuple[SettingSpec, ...] = (
           help="Display name of the person who owns this deployment. Aura uses it when "
                "she talks about you. Leave it empty and she simply does not claim to "
                "know a name; she never invents one."),
+
+    # --- persona ------------------------------------------------------------
+    # Style only. These shape how Aura sounds; they cannot change who she is,
+    # what she may do, or the language of the interface.
+    _spec("persona_tone", "balanced", kind="choice", group="persona", env="PERSONA_TONE",
+          label="Persona tone", choices=("balanced", "warm", "professional", "playful"),
+          help="How Aura sounds in conversation. 'balanced' is the built-in voice; the others "
+               "lean warmer, more professional or more playful. Style only: identity, honesty "
+               "and safety rules never change."),
+    _spec("persona_note", "", kind="text", group="persona", env="PERSONA_NOTE", max_length=400,
+          label="Persona note",
+          help="One line about how Aura should talk to you — address, formality, pet peeves. "
+               "It is data, not a new instruction set: it cannot grant capabilities, change her "
+               "identity, or override the interface language."),
 
     # --- per-user limits ----------------------------------------------------
     # 0 means unlimited, which is the default: enabling a quota is an explicit
@@ -403,6 +419,10 @@ def _validate(spec: SettingSpec, value: str) -> str:
     if not isinstance(value, str):
         value = str(value)
     text = value.strip()
+    if spec.max_length is not None and len(text) > spec.max_length:
+        # Refuse rather than truncate: a silently shortened note is a setting
+        # that does not say what the owner thinks it says.
+        raise SettingError(f"Maximum length is {spec.max_length} characters")
     if spec.kind == "bool":
         normalized = text.lower()
         if normalized in {"1", "true", "yes", "on"}:

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from test_agent_tool_response import isolated_bot, _telegram_update, _text_response
+from test_agent_tool_response import _telegram_update, _text_response
 
 
 def _update(text, *, group=False, chat_id=-100123):
@@ -234,6 +234,7 @@ def test_bad_confirmation_wording_falls_back_after_real_commit(isolated_bot, phr
 ])
 def test_wrong_or_greeting_delivery_falls_back_to_one_saved_task(isolated_bot, task, phrase):
     from datetime import datetime, timedelta, timezone
+
     from reminders import ReminderSpec
     bot, client = isolated_bot
     reminder_id = bot.reminder_store.create(
@@ -251,6 +252,7 @@ def test_wrong_or_greeting_delivery_falls_back_to_one_saved_task(isolated_bot, t
 
 def test_reminder_uses_saved_group_model_and_only_the_verified_founder(isolated_bot, monkeypatch):
     from datetime import datetime, timedelta, timezone
+
     from reminders import ReminderSpec
     bot, client = isolated_bot
     group = -100123
@@ -303,6 +305,7 @@ def test_reply_accepting_a_quoted_identity_assignment_still_keeps_aura(isolated_
 
 def test_due_paraphrase_cannot_reverse_the_saved_action(isolated_bot):
     from datetime import datetime, timedelta, timezone
+
     from reminders import ReminderSpec
     bot, client = isolated_bot
     task = "برم بیرون"
@@ -334,6 +337,7 @@ def test_translation_of_a_reminder_sentence_is_not_a_real_promise(isolated_bot):
 
 def test_task_quantity_one_is_not_dropped_or_changed_in_delivery(isolated_bot):
     from datetime import datetime, timedelta, timezone
+
     from reminders import ReminderSpec
     bot, client = isolated_bot
     task = "یه قرص بخورم"
@@ -382,6 +386,7 @@ def test_witty_rejection_does_not_require_a_fixed_no_or_name(isolated_bot):
 
 def test_group_mention_escapes_even_valid_model_wording(isolated_bot):
     from datetime import datetime, timedelta, timezone
+
     from reminders import ReminderSpec
     bot, client = isolated_bot
     rid = bot.reminder_store.create(

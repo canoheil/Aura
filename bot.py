@@ -1,101 +1,29 @@
 #!/usr/bin/env python3
 
 import asyncio
-import logging
-import os
-import sqlite3
-import threading
-import time
-from pathlib import Path
-from typing import Optional
 import base64
-import re
-import json
 import csv
 import io
-import tempfile
+import json
+import logging
 import mimetypes
+import os
 import random
+import re
+import sqlite3
+import tempfile
+import threading
+import time
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
-from urllib.parse import urlparse, parse_qs
-
-from tool_system import (
-    AgentRunState, AgentRunner, ToolRegistry, has_textual_tool_declaration, text_has_tool_declaration,
-)
-from answer_quality import has_web_evidence, has_any_web_evidence, remove_generated_source_section
-from chat_update_processor import ChatUpdateProcessor
-from ephemeral_context import ExpiringContext
-from reminders import (
-    MAX_TEXT_LENGTH, ReminderError, ReminderScheduler, ReminderSpec, ReminderStore, format_due,
-    ambiguous_reminder_source, explicit_reminder_time_count, explicit_reminder_time_phrases, grounded_reminder_task,
-    has_recurring_reminder, is_reminder_request, parse_reminder,
-    parse_reminder_time_expression, reminder_source_contains, reminder_time_reply, reminder_wording_matches_task,
-)
-from image_intent import (
-    extract_image_command_prompt,
-    extract_text_image_request,
-    looks_like_image_edit_request,
-    needs_edit_details,
-)
-from pollinations_image import GeneratedImage, PollinationsError, PollinationsImageClient
-from meme_api import (
-    Meme,
-    MemeClient,
-    MemeError,
-    could_involve_a_meme,
-    extract_meme_topic,
-    looks_like_meme_request,
-)
-import freshness_policy
-from weather_api import (
-    WeatherClient,
-    WeatherError,
-    ResolvedLocation,
-    extract_weather_location,
-    looks_like_weather_request,
-)
-import svg_image
-from svg_image import SvgError, render_svg_image
-from reaction_manager import reaction_manager
-from sticker_manager import sticker_manager
-import sticker_vision
-from reply_context import (
-    build_reply_context,
-    build_request_with_reply_context,
-    build_reply_media_request,
-)
-from error_handling import classify_gemini_error, classify_telegram_error, generic_user_error
-import providers
-import migrations
-import data_deletion
-import usage_limits
-from providers import ProviderError
-from settings_store import SPECS, SettingError, SettingsStore
-from admin_panel import AdminAccess, admin_callback, admin_command
-from retry_policy import call_with_retry, extract_status_code
-from observability import RequestTrace
-import i18n
-from i18n import t as _t
-from aura_identity import AuraIdentity
-from aura_self_identity import AuraSelfIdentityBoundary
-from aura_personality_boundary import (
-    AuraPersonalityBoundary, identity_answer_keeps_boundary, is_identity_override_attempt,
-)
-import persona
-from group_context import build_group_context
-from message_identity import build_message_identity_context
-from memory_bridge import MemoryBridge
-from telegram_formatting import (
-    render_telegram_html,
-    strip_formatting,
-    split_telegram_html,
-)
 
 import requests
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from dotenv import load_dotenv
 from telegram import Bot, ReactionTypeEmoji, Update
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
@@ -108,6 +36,95 @@ from telegram.ext import (
     MessageHandler,
     TypeHandler,
     filters,
+)
+
+import data_deletion
+import freshness_policy
+import i18n
+import migrations
+import persona
+import providers
+import sticker_vision
+import svg_image
+import usage_limits
+from admin_panel import AdminAccess, admin_callback, admin_command
+from answer_quality import has_any_web_evidence, has_web_evidence, remove_generated_source_section
+from aura_identity import AuraIdentity
+from aura_personality_boundary import (
+    AuraPersonalityBoundary,
+    identity_answer_keeps_boundary,
+    is_identity_override_attempt,
+)
+from aura_self_identity import AuraSelfIdentityBoundary
+from chat_update_processor import ChatUpdateProcessor
+from ephemeral_context import ExpiringContext
+from error_handling import classify_gemini_error, classify_telegram_error, generic_user_error
+from group_context import build_group_context
+from i18n import t as _t
+from image_intent import (
+    extract_image_command_prompt,
+    extract_text_image_request,
+    looks_like_image_edit_request,
+    needs_edit_details,
+)
+from meme_api import (
+    MemeClient,
+    MemeError,
+    could_involve_a_meme,
+    extract_meme_topic,
+    looks_like_meme_request,
+)
+from memory_bridge import MemoryBridge
+from message_identity import build_message_identity_context
+from observability import RequestTrace
+from pollinations_image import PollinationsError, PollinationsImageClient
+from providers import ProviderError
+from reaction_manager import reaction_manager
+from reminders import (
+    MAX_TEXT_LENGTH,
+    ReminderError,
+    ReminderScheduler,
+    ReminderSpec,
+    ReminderStore,
+    ambiguous_reminder_source,
+    explicit_reminder_time_count,
+    explicit_reminder_time_phrases,
+    format_due,
+    grounded_reminder_task,
+    has_recurring_reminder,
+    is_reminder_request,
+    parse_reminder,
+    parse_reminder_time_expression,
+    reminder_source_contains,
+    reminder_time_reply,
+    reminder_wording_matches_task,
+)
+from reply_context import (
+    build_reply_context,
+    build_request_with_reply_context,
+)
+from retry_policy import call_with_retry, extract_status_code
+from settings_store import SPECS, SettingError, SettingsStore
+from sticker_manager import sticker_manager
+from svg_image import SvgError, render_svg_image
+from telegram_formatting import (
+    render_telegram_html,
+    split_telegram_html,
+    strip_formatting,
+)
+from tool_system import (
+    AgentRunner,
+    AgentRunState,
+    ToolRegistry,
+    has_textual_tool_declaration,
+    text_has_tool_declaration,
+)
+from weather_api import (
+    ResolvedLocation,
+    WeatherClient,
+    WeatherError,
+    extract_weather_location,
+    looks_like_weather_request,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -547,7 +564,7 @@ else:
         POLLINATIONS_IMAGE_MODEL, POLLINATIONS_EDIT_MODEL,
     )
 
-SYSTEM_PROMPT = f"""
+SYSTEM_PROMPT = """
 You are Aura, an advanced personal AI assistant.
 
 Personality:
@@ -2158,9 +2175,12 @@ def _build_memory_forget_declaration() -> types.FunctionDeclaration:
 def _tool_memory_search(args: dict) -> dict:
     owner = int(args.get("_owner_user_id") or 0)
     query = str(args.get("query") or "").strip()
-    try: limit = max(1, min(MEMORY_MAX_RESULTS, int(args.get("limit", MEMORY_MAX_RESULTS))))
-    except (TypeError, ValueError): limit = MEMORY_MAX_RESULTS
-    if not owner or not query: return {"ok":False,"error":"Memory search requires a valid user and query."}
+    try:
+        limit = max(1, min(MEMORY_MAX_RESULTS, int(args.get("limit", MEMORY_MAX_RESULTS))))
+    except (TypeError, ValueError):
+        limit = MEMORY_MAX_RESULTS
+    if not owner or not query:
+        return {"ok": False, "error": "Memory search requires a valid user and query."}
     recall_request = _has_any(_normalize_memory_text(query), (
         "چی یادت", "چی از من یادت", "چه چیزهایی یادت", "چه چیزایی یادت",
         "حافظه", "یادت میاد", "چی درباره من", "what do you remember",
@@ -2171,23 +2191,35 @@ def _tool_memory_search(args: dict) -> dict:
 
 
 def _tool_memory_save(args: dict) -> dict:
-    owner = int(args.get("_owner_user_id") or 0); content = str(args.get("content") or "").strip()[:MEMORY_MAX_CONTENT_CHARS]
-    if not owner or not content: return {"ok":False,"error":"Memory save requires a valid user and content."}
+    owner = int(args.get("_owner_user_id") or 0)
+    content = str(args.get("content") or "").strip()[:MEMORY_MAX_CONTENT_CHARS]
+    if not owner or not content:
+        return {"ok": False, "error": "Memory save requires a valid user and content."}
     speaker = int(args.get("_speaker_user_id") or owner)
     resolved = memory_bridge.resolve_owner(speaker_user_id=speaker, explicit_owner_user_id=owner)
     valid, reason = memory_bridge.validate_memory_content(content)
-    if not resolved: return {"ok":False,"error":"Memory owner must match the current speaker."}
-    if not valid: return {"ok":False,"error":f"Memory content rejected: {reason}."}
+    if not resolved:
+        return {"ok": False, "error": "Memory owner must match the current speaker."}
+    if not valid:
+        return {"ok": False, "error": f"Memory content rejected: {reason}."}
     owner = resolved.user_id
     kind = str(args.get("memory_type") or "explicit").strip()[:40] or "explicit"
-    try: importance = max(1, min(5, int(args.get("importance", 5))))
-    except (TypeError, ValueError): importance = 5
-    return {"ok":save_memory(owner, kind, content, importance, 1.0),"saved":True,"content":content}
+    try:
+        importance = max(1, min(5, int(args.get("importance", 5))))
+    except (TypeError, ValueError):
+        importance = 5
+    return {
+        "ok": save_memory(owner, kind, content, importance, 1.0),
+        "saved": True,
+        "content": content,
+    }
 
 
 def _tool_memory_forget(args: dict) -> dict:
-    owner = int(args.get("_owner_user_id") or 0); query = str(args.get("query") or "").strip()
-    if not owner or not query: return {"ok":False,"error":"Memory forget requires a valid user and query."}
+    owner = int(args.get("_owner_user_id") or 0)
+    query = str(args.get("query") or "").strip()
+    if not owner or not query:
+        return {"ok": False, "error": "Memory forget requires a valid user and query."}
     return {"ok":True,"deactivated":delete_memory(owner, query)}
 
 def _build_send_sticker_declaration() -> types.FunctionDeclaration:
@@ -3554,8 +3586,10 @@ def _clean_search_result(item: dict) -> Optional[dict]:
     highlights = contents.get("highlights") or item.get("highlights") or []
     markdown = contents.get("markdown") or item.get("markdown") or ""
     html_content = contents.get("html") or item.get("html") or ""
-    if not isinstance(snippets, list): snippets = [str(snippets)]
-    if not isinstance(highlights, list): highlights = [str(highlights)]
+    if not isinstance(snippets, list):
+        snippets = [str(snippets)]
+    if not isinstance(highlights, list):
+        highlights = [str(highlights)]
     return {
         "title": str(item.get("title") or "Untitled")[:300],
         "url": url[:1000],
@@ -3834,13 +3868,18 @@ def format_web_context(query: str, results: list[dict]) -> str:
     for i, item in enumerate(results, 1):
         lines.append(f"\nSOURCE {i} ({item.get('source_type', 'web')})")
         lines.append(f"Title: {item.get('title', '')}")
-        if item.get("date"): lines.append(f"Page age/publication date: {item['date']}")
-        if item.get("authors"): lines.append(f"Authors: {', '.join(map(str, item['authors'][:5]))}")
+        if item.get("date"):
+            lines.append(f"Page age/publication date: {item['date']}")
+        if item.get("authors"):
+            lines.append(f"Authors: {', '.join(map(str, item['authors'][:5]))}")
         lines.append(f"URL: {item.get('url', '')}")
-        if item.get("description"): lines.append(f"Description: {item['description']}")
-        for h in item.get("highlights", [])[:6]: lines.append(f"Relevant passage: {h}")
+        if item.get("description"):
+            lines.append(f"Description: {item['description']}")
+        for h in item.get("highlights", [])[:6]:
+            lines.append(f"Relevant passage: {h}")
         if not item.get("highlights"):
-            for sn in item.get("snippets", [])[:3]: lines.append(f"Snippet: {sn}")
+            for sn in item.get("snippets", [])[:3]:
+                lines.append(f"Snippet: {sn}")
         if item.get("content"):
             lines.append(f"Extracted page content: {item['content'][:10000]}")
     return "\n".join(lines)
@@ -5223,7 +5262,12 @@ def build_reply_media_request(
     media_bytes: bytes,
     mime_type: str,
 ) -> list[dict]:
-    """Build a Gemini-native request for media attached to a replied-to message."""
+    """Build a Gemini-native request for media attached to a replied-to message.
+
+    reply_context carries a simpler builder without the media validation below;
+    this local one is what the handlers use, so it is deliberately not imported
+    under the same name.
+    """
     if not isinstance(media_bytes, (bytes, bytearray)) or not media_bytes:
         raise GeminiAPIError("Media data is missing.")
     if not mime_type or "/" not in mime_type:

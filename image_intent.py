@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-
 _IMAGE_COMMAND = re.compile(
     r"^\s*/image(?:@[A-Za-z0-9_]+)?(?:\s+(.*))?$",
     flags=re.IGNORECASE | re.DOTALL,

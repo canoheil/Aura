@@ -2,7 +2,6 @@ from pathlib import Path
 
 from telegram_formatting import render_telegram_html
 
-
 BOT_SOURCE = (Path(__file__).resolve().parent / "bot.py").read_text()
 
 

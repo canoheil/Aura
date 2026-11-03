@@ -21,6 +21,8 @@ uses fake Telegram/Gemini clients.
 ## Running the tests
 
 ```bash
+cd /path/to/Aura              # run from the repository root: a few tests read
+                              # bot.py / requirements.txt by relative path
 python -m pytest              # whole suite
 python -m pytest test_answer_quality.py -v
 python -m pytest -k reminder  # a subset
@@ -31,6 +33,38 @@ When you change behavior, add or update a test that fails without your fix.
 
 If a test needs credentials it is written wrong — the suite must stay offline and
 must never call Telegram, Gemini, You.com, Pollinations or mimir endpoints.
+
+## Linting
+
+`ruff` is the only linter, configured in `pyproject.toml`. It does not format
+code (yet): the rule set is deliberately limited to mistakes — unused imports,
+undefined names, syntax errors, import order — so the diff of a pull request
+stays about the change.
+
+```bash
+ruff check .        # what CI runs
+ruff check . --fix  # apply the automatic fixes (mainly import order)
+```
+
+`bot.py` is one large module and `ruff format` would rewrite it wholesale. If you
+want to adopt the formatter, do it in its own pull request with no other changes.
+
+## Pre-commit hooks (optional, recommended)
+
+The same checks can run before you commit, so CI rarely surprises you:
+
+```bash
+pip install -r requirements-dev.txt
+pre-commit install                        # ruff + file hygiene on commit
+pre-commit install --hook-type pre-push   # the full test suite before push
+pre-commit run --all-files                # run everything once, on demand
+```
+
+Install the hooks from **inside the active virtualenv**: the test hook runs
+`python -m pytest`, and `python` must be the interpreter that has the project's
+dependencies. One hook is specific to this project: `repo_guard.py` refuses to
+commit `.env`, `bot.db`, `.aura_secret_key` or any other database file, even when
+`git add -f` is used.
 
 ## Code layout
 
@@ -50,7 +84,7 @@ its own pull request.
 
 ## Style
 
-- Python 3.11+, standard library first.
+- Python 3.11+, standard library first. `ruff check .` must pass.
 - Follow the style of the file you are editing; keep diffs focused.
 - Prefer one clear function over clever indirection; this code is read during
   incidents.

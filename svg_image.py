@@ -18,13 +18,13 @@ Notes on text:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from functools import lru_cache
 import logging
-from pathlib import Path
 import re
 import secrets
 import time
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("aura-svg")

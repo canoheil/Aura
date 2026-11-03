@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 from reminders import ReminderSpec
-from test_agent_tool_response import isolated_bot, _telegram_update, _text_response
+from test_agent_tool_response import _telegram_update, _text_response
 
 
 def test_natural_request_is_persisted_without_model_guessing(isolated_bot):

@@ -1,9 +1,9 @@
 """Small bounded in-memory contexts; no attachment bytes are retained."""
 from __future__ import annotations
 
-from collections import OrderedDict
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Callable, Hashable
 
 

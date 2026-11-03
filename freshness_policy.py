@@ -34,9 +34,9 @@ when the underlying model is swapped.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import re
+from dataclasses import dataclass
 from typing import Optional, Sequence
 
 logger = logging.getLogger("aura-freshness")

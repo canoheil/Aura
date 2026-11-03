@@ -15,11 +15,11 @@ never included in logs or exception messages.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import re
 import secrets
 import time
+from dataclasses import dataclass
 from typing import Callable, Optional
 from urllib.parse import quote, urlparse
 

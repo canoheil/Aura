@@ -7,17 +7,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 import sticker_vision
-import test_agent_tool_response as _harness
 from sticker_vision import StickerPlan, describe_for_model, plan_sticker, sniff_image_mime
 from test_agent_tool_response import _telegram_update, _text_response
 
 PERSIAN = re.compile("[\u0600-\u06FF]")
-
-# The real bot module, loaded against an in-memory database and a fake model, is
-# the shared fixture in the harness. pytest registers fixtures by module
-# attribute name, so this re-export hands it to these tests without the import
-# and the test parameter tripping over each other.
-isolated_bot = _harness.isolated_bot
 
 # Minimal but correctly signed payloads: the MIME is sniffed from these bytes.
 WEBP = b"RIFF\x24\x00\x00\x00WEBPVP8 " + b"\x00" * 24

@@ -20,19 +20,18 @@ testable hint.
 """
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass
 import logging
 import random
 import re
 import secrets
 import threading
 import time
+from collections import deque
+from dataclasses import dataclass
 from typing import Optional, Sequence
 from urllib.parse import urlparse
 
 import requests
-
 
 logger = logging.getLogger("aura-memes")
 

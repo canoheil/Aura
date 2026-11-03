@@ -6,8 +6,8 @@ import threading
 
 import pytest
 
+from test_agent_tool_response import _telegram_update, _text_response
 from usage_limits import Limits, Usage, UsageStore, evaluate, next_reset
-from test_agent_tool_response import isolated_bot, _telegram_update, _text_response
 
 PERSIAN = re.compile("[\u0600-\u06FF]")
 
@@ -265,7 +265,6 @@ def test_the_bot_prunes_old_rows_at_startup(isolated_bot):
 
 def test_image_commands_are_counted_and_gated(isolated_bot):
     """Images cost the most; a cap that skipped them would be theatre."""
-    from types import SimpleNamespace
     from unittest.mock import AsyncMock, PropertyMock, patch
 
     bot, _ = isolated_bot

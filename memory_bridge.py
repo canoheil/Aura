@@ -5,9 +5,8 @@ Telegram identity. Identity belongs to the identity layer.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
-
+from dataclasses import dataclass
 
 _IDENTITY_PATTERNS = (
     r"(?:^|\s)(?:اسمم|اسم من|منو)\s+[^،.!؟?]{1,120}(?:است|هست|صدا(?:م|م کن)|کن)",

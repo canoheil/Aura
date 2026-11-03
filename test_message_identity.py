@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+
 from message_identity import build_message_identity_context
 
 

@@ -5,7 +5,6 @@ fake ``requests.Session.get`` that returns synthetic JSON + image bytes.
 """
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -459,8 +458,6 @@ def test_bot_passes_the_fetch_budget_to_the_client():
 
 
 def test_bot_delivery_handles_meme():
-    tree = ast.parse((ROOT / "bot.py").read_text(encoding="utf-8"))
-    source = ast.unparse(tree) if hasattr(ast, "unparse") else (ROOT / "bot.py").read_text(encoding="utf-8")
     assert "is_animation" in (ROOT / "bot.py").read_text(encoding="utf-8")
     assert "reply_animation" in (ROOT / "bot.py").read_text(encoding="utf-8")
 

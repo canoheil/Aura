@@ -20,7 +20,6 @@ from pollinations_image import (
     image_dimensions,
 )
 
-
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + (b"0" * 256) + b"\xff\xd9"
 
 

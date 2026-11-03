@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from group_context import GroupContext, build_group_context
+from group_context import build_group_context
 
 
 def user(uid, first, username=None):

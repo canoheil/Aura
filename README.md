@@ -519,14 +519,25 @@ The suite is hermetic: it uses fake Telegram and Gemini clients, needs no API
 keys, and makes no network calls.
 
 ```bash
-pip install -r requirements-dev.txt   # runtime dependencies + pytest
+pip install -r requirements-dev.txt   # runtime dependencies + pytest + ruff
 python -m pytest
+ruff check .
 ```
 
-Everything must pass before a pull request is merged; the same command runs in
-CI (`.github/workflows/tests.yml`). Tests live next to the modules they cover and
-are named `test_*.py`. When you change behavior, add a test that fails without
+Everything must pass before a pull request is merged; the same commands run in CI
+(`.github/workflows/tests.yml`), and a failing lint job stops the build before the
+test job spends time on dependencies. Tests live next to the modules they cover
+and are named `test_*.py`. When you change behavior, add a test that fails without
 your fix.
+
+Tool configuration lives in `pyproject.toml` (pytest and ruff); `ruff` lints but
+does not reformat, so a pull request shows only its own changes. Optional
+pre-commit hooks run both checks locally:
+
+```bash
+pre-commit install                        # lint before each commit
+pre-commit install --hook-type pre-push   # tests before each push
+```
 
 ## Running as a service
 

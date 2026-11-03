@@ -30,7 +30,7 @@ import requests
 
 import i18n
 from answer_quality import has_any_web_evidence, has_web_evidence
-from tool_system import AgentRunState, AgentRunner, ToolRegistry, text_has_tool_declaration
+from tool_system import AgentRunner, AgentRunState, ToolRegistry, text_has_tool_declaration
 
 logger = logging.getLogger("aura-providers")
 

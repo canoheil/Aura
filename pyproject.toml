@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aura-telegram-bot"
+version = "0.3.0"
+description = "Aura — a Persian/English AI assistant for Telegram, built on Gemini or any OpenAI-compatible model"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Aura contributors" }]
+keywords = ["telegram", "telegram-bot", "gemini", "llm", "openai", "persian", "chatbot"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+]
+[project.urls]
+Homepage = "https://github.com/canoheil/Aura"
+Issues = "https://github.com/canoheil/Aura/issues"
+Changelog = "https://github.com/canoheil/Aura/pulls?q=is%3Apr+is%3Amerged"
+
+# Runtime dependencies are declared in requirements.txt, which is what the
+# deployment scripts and the Docker-less install instructions already use. Keeping
+# a second copy here would let the two drift; a bare `pip install .` is not a
+# supported install path, `pip install -r requirements.txt` is.
+dependencies = []
+
+[tool.setuptools]
+# The application is a flat set of modules run as `python bot.py`; nothing is
+# packaged for distribution, this section only keeps the build metadata valid.
+py-modules = ["bot"]
+
+# --- pytest ----------------------------------------------------------------
+# Tests live next to the flat application modules, so the repository root is the
+# test root as well. Configuration lives here (not in pytest.ini) so every tool
+# is configured in one file.
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+python_classes = ["Test*"]
+norecursedirs = [
+    ".git", ".venv", "venv", "env", ".pytest_cache", ".mypy_cache",
+    ".ruff_cache", "__pycache__", "build", "dist", "node_modules",
+]
+addopts = "-ra"
+
+# --- ruff ------------------------------------------------------------------
+# Lint first, format later: `bot.py` is a single 6k-line module, so turning on
+# the formatter would rewrite it wholesale and bury every real change in noise.
+# The rule set below is the "obvious mistake" set — unused imports, undefined
+# names, syntax errors, import order — not an opinion about style.
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = [".venv", "venv", "env", "build", "dist"]
+# Keep the cache out of the source tree in CI artifacts and local checkouts.
+cache-dir = ".ruff_cache"
+
+[tool.ruff.lint]
+select = [
+    "E4",  # imports (duplicate, wildcard)
+    "E7",  # statements (multiple statements on one line)
+    "E9",  # runtime errors (syntax, etc.)
+    "F",   # pyflakes: unused names, undefined names, shadowing
+    "I",   # import sorting
+]
+# F541 (f-string without placeholders) is kept: the current one is a real bug.
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# Test modules import helpers from the shared harness on purpose; the fixtures
+# themselves are re-exported once in conftest.py.
+"conftest.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["conftest"]

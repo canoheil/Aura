@@ -2,8 +2,7 @@
 import pytest
 
 from aura_identity import AuraIdentity
-from test_agent_tool_response import isolated_bot, _telegram_update
-
+from test_agent_tool_response import _telegram_update
 
 # --- the identity context ---------------------------------------------------
 
@@ -206,9 +205,9 @@ def test_admin_can_set_and_clear_the_name(tmp_path):
 
 
 def test_the_identity_group_is_visible_in_the_panel():
-    import admin_panel
     import sqlite3
 
+    import admin_panel
     from settings_store import SettingsStore
 
     connection = sqlite3.connect(":memory:", check_same_thread=False)

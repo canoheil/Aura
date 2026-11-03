@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-
 logger = logging.getLogger("aura-stickers")
 
 DEFAULT_CONFIG_FILENAME = "stickers_config.json"

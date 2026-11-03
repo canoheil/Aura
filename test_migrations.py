@@ -5,7 +5,6 @@ import pytest
 
 import migrations
 from migrations import Migration, MigrationError, migrate, schema_version
-from test_agent_tool_response import isolated_bot
 
 
 def _db() -> sqlite3.Connection:

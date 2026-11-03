@@ -4,14 +4,13 @@
 This suite intentionally focuses on public helpers and pure/local behavior so it
 can run offline and cannot mutate Production credentials or bot.db.
 """
-from pathlib import Path
 import ast
-import zipfile
+from pathlib import Path
 
 from health_check import HealthResult, overall_health
-from reply_context import build_reply_context, build_request_with_reply_context
-from telegram_formatting import render_telegram_html, strip_formatting, split_telegram_html
 from reaction_manager import ReactionManager
+from reply_context import build_reply_context, build_request_with_reply_context
+from telegram_formatting import render_telegram_html, split_telegram_html, strip_formatting
 
 
 def test_project_has_expected_core_modules():

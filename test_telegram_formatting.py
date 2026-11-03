@@ -1,4 +1,4 @@
-from telegram_formatting import render_telegram_html, strip_formatting, split_telegram_html
+from telegram_formatting import render_telegram_html, split_telegram_html, strip_formatting
 
 
 def test_plain_text_is_escaped():

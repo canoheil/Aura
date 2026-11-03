@@ -4,6 +4,7 @@ Sprint 5: keep the current speaker, replied-to author, forwarded origin and
 media ownership distinct. This module is read-only and never mutates memory.
 """
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Optional
 

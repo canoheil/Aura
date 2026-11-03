@@ -84,6 +84,8 @@ OPENAI_MODEL=gpt-4o-mini
 - `BOT_NAME`
 - `BOT_LANGUAGE`
 - `OWNER_NAME`
+- `USER_DAILY_TURNS`
+- `USER_DAILY_TOKENS`
 - `FOUNDER_USER_ID`
 - `YOU_API_KEY`
 - `WEB_SEARCH_ENABLED`
@@ -560,7 +562,76 @@ Aura stores conversation history, web-search cache/usage, and long-term memory i
 
 If you are updating an existing Aura installation, keep its existing `bot.db`. The application is designed to preserve and migrate the existing database schema non-destructively.
 
-### Schema versions and migrations
+## Per-user limits
+
+Aura is often deployed on a public link with a single API key. Two optional caps
+keep one account from spending the whole day's budget before anyone else gets an
+answer:
+
+```bash
+USER_DAILY_TURNS=40      # model turns per Telegram user per UTC day; 0 = unlimited
+USER_DAILY_TOKENS=150000 # token budget, when the provider reports usage; 0 = unlimited
+```
+
+or at runtime: `/admin set user_daily_turns 40`. Both default to **0, meaning
+unlimited** — enabling a quota is an explicit decision, never a side effect of
+upgrading.
+
+- The window is the UTC calendar day. `/usage` shows today's counter, the limits
+  and when they reset, in the user's own reminder timezone.
+- The founder and anyone in `ADMIN_USER_IDS` are never limited, and their usage
+  is not counted.
+- When a limit is reached, the turn is refused **before** the model is called,
+  with a message that says what was used and when it resets. Commands keep
+  working: a capped user can still run `/usage`, `/deletemydata`, `/new` and the
+  rest.
+- `/image` is counted too, since it is the most expensive action available.
+- A counter that cannot be read (a corrupt value, a missing row) is treated as
+  unlimited rather than blocking everyone.
+
+The counter lives in `user_usage`, one row per user per day; rows for other days
+are pruned at startup. `/deletemydata` removes it with everything else.
+
+## Your data, and deleting it
+
+Aura stores conversation history, long-term memory, reminders, the reminder
+timezone and the language choice, all keyed by the Telegram user (private chats)
+or chat ID (groups). Nothing is sent anywhere except the requests needed to
+answer a message.
+
+`/deletemydata` deletes all of it for the person asking, in two steps:
+
+```
+/deletemydata            show exactly what is stored, with counts
+/deletemydata confirm    really delete it (valid for 5 minutes)
+/deletemydata cancel     change your mind
+```
+
+- The preview is the promise: both messages are rendered from the same
+  `CATEGORIES` list in `data_deletion.py`, and a test fails if a personal table
+  is added without being listed there.
+- The wipe is one transaction across every table, so a failure leaves the data
+  intact instead of half-deleted.
+- It only works in a **private chat**. A group's history is shared and contains
+  other members' messages, so clearing it from one member's command would delete
+  everyone's.
+- Shared, non-personal state is deliberately untouched: the web-search cache and
+  its daily counters, `app_settings`/`app_settings_audit`, `allowed_groups` and
+  the sticker cache.
+- The confirmation is written in the language the user was using, even though
+  the language row itself is gone by then.
+
+Deleting rows does not shrink the file on disk (SQLite reuses the freed pages).
+To reclaim space on a server:
+
+```bash
+sqlite3 bot.db 'VACUUM'
+```
+
+Backups are the deployment's responsibility: Aura cannot delete copies that
+already exist in an operator's `bot.db.bak`.
+
+## Schema versions and migrations
 
 Every table is created with `CREATE TABLE IF NOT EXISTS` by the module that owns
 it, so a fresh database and an existing one converge on the same schema. Changes

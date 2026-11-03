@@ -138,6 +138,18 @@ SPECS: tuple[SettingSpec, ...] = (
                "she talks about you. Leave it empty and she simply does not claim to "
                "know a name; she never invents one."),
 
+    # --- per-user limits ----------------------------------------------------
+    # 0 means unlimited, which is the default: enabling a quota is an explicit
+    # decision, never a side effect of upgrading.
+    _spec("user_daily_turns", "0", kind="int", group="limits", env="USER_DAILY_TURNS",
+          label="Messages per user per day", minimum=0, maximum=100000,
+          help="Model turns one Telegram user may spend per UTC day. 0 = unlimited. "
+               "The founder and admins are never limited."),
+    _spec("user_daily_tokens", "0", kind="int", group="limits", env="USER_DAILY_TOKENS",
+          label="Tokens per user per day", minimum=0, maximum=100000000,
+          help="Token budget per Telegram user per UTC day, when the provider reports usage. "
+               "0 = unlimited."),
+
     # --- behaviour ----------------------------------------------------------
     _spec("bot_language", "fa", kind="choice", group="behaviour", env="BOT_LANGUAGE",
           label="Bot language", choices=("fa", "en"),

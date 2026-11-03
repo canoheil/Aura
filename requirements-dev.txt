@@ -6,4 +6,4 @@
 -r requirements.txt
 
 # Test runner. Kept as a wide-enough range so CI and local runs agree on behavior.
-pytest>=8.3,<10
+pytest>=9.2.0,<10

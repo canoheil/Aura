@@ -17,6 +17,7 @@ import tempfile
 import mimetypes
 import random
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from urllib.parse import urlparse, parse_qs
 
 from tool_system import (
@@ -67,6 +68,7 @@ from error_handling import classify_gemini_error, classify_telegram_error, gener
 import providers
 import migrations
 import data_deletion
+import usage_limits
 from providers import ProviderError
 from settings_store import SPECS, SettingError, SettingsStore
 from admin_panel import AdminAccess, admin_callback, admin_command
@@ -810,6 +812,13 @@ SETTINGS = SettingsStore(db, db_lock, db_path=DB_FILE)
 # Per-user interface language (set with /language). Falls back to the
 # deployment-wide `bot_language` setting, then Persian.
 LANGUAGE_STORE = i18n.LanguageStore(db, db_lock)
+# Per-user, per-UTC-day usage counters behind the optional quota. Yesterday's
+# rows are dropped at startup: only today's counter can ever gate a message.
+USAGE_STORE = usage_limits.UsageStore(db, db_lock)
+try:
+    USAGE_STORE.purge_history()
+except Exception:
+    logger.warning("Could not prune old usage counters", exc_info=True)
 ADMIN_ACCESS = AdminAccess.from_env(FOUNDER_USER_ID)
 logger.info(
     "Settings ready | provider=%s | encryption=%s | admins=%s",
@@ -886,6 +895,53 @@ def owner_name() -> str:
 def tr(key: str, update: Optional[Update] = None, **values) -> str:
     """Translate a user-facing string for the current user."""
     return _t(key, user_language(update), **values)
+
+
+def is_privileged_user(update: Optional[Update] = None, user_id: Optional[int] = None) -> bool:
+    """Founder and configured admins are never rate-limited."""
+    uid = user_id if user_id is not None else (update.effective_user.id if update and update.effective_user else None)
+    if not uid:
+        return False
+    return bool((FOUNDER_USER_ID and uid == FOUNDER_USER_ID) or ADMIN_ACCESS.allows(uid))
+
+
+def user_limits() -> usage_limits.Limits:
+    return usage_limits.Limits.from_setting(SETTINGS.get_int)
+
+
+def quota_message(decision: usage_limits.Decision, update: Optional[Update] = None,
+                  user_id: Optional[int] = None) -> str:
+    """The refusal, with the reset time in the user's own timezone.
+
+    A UTC timestamp is correct but unhelpful; the reminder timezone is the only
+    per-user clock Aura already knows, so it is used when it can be resolved.
+    """
+    lang = user_language(update, user_id=user_id)
+    uid = user_id if user_id is not None else (update.effective_user.id if update and update.effective_user else None)
+    zone = reminder_store.get_timezone(uid) if uid else REMINDER_DEFAULT_TIMEZONE
+    try:
+        reset = datetime.fromtimestamp(usage_limits.next_reset(), timezone.utc).astimezone(
+            ZoneInfo(zone)
+        ).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        zone = "UTC"
+        reset = datetime.fromtimestamp(usage_limits.next_reset(), timezone.utc).strftime("%Y-%m-%d %H:%M")
+    key = "quota.tokens_reached" if decision.reason == "tokens" else "quota.turns_reached"
+    return _t(key, lang, used=decision.used, limit=decision.limit, reset=reset, zone=zone)
+
+
+def check_user_quota(update: Update) -> Optional[usage_limits.Decision]:
+    """Return the blocking decision, or None when this turn may proceed."""
+    if not update.effective_user:
+        return None
+    if is_privileged_user(update):
+        return None
+    limits = user_limits()
+    if limits.unlimited:
+        return None
+    usage = USAGE_STORE.today(update.effective_user.id)
+    decision = usage_limits.evaluate(usage, limits)
+    return None if decision.allowed else decision
 
 
 def configured_provider() -> str:
@@ -4477,6 +4533,41 @@ async def language_command(
     )
 
 
+def _usage_reset_text(update: Update, user_id: int) -> tuple[str, str]:
+    """(reset time, zone) of the next UTC midnight, expressed in the user's zone."""
+    zone = reminder_store.get_timezone(user_id)
+    try:
+        reset = datetime.fromtimestamp(usage_limits.next_reset(), timezone.utc).astimezone(
+            ZoneInfo(zone)
+        ).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        zone = "UTC"
+        reset = datetime.fromtimestamp(usage_limits.next_reset(), timezone.utc).strftime("%Y-%m-%d %H:%M")
+    return reset, zone
+
+
+async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show today's counter and the remaining allowance."""
+    if not update.effective_user or not update.message:
+        return
+    user_id = update.effective_user.id
+    usage = USAGE_STORE.today(user_id)
+    limits = user_limits()
+    lang = user_language(update)
+    reset, zone = _usage_reset_text(update, user_id)
+    lines = [_t("usage.header", lang)]
+    if limits.daily_turns > 0:
+        lines.append(_t("usage.turns", lang, used=usage.turns, limit=limits.daily_turns))
+    else:
+        lines.append(_t("usage.turns_unlimited", lang, used=usage.turns))
+    if limits.daily_tokens > 0:
+        lines.append(_t("usage.tokens", lang, used=usage.tokens, limit=limits.daily_tokens))
+    else:
+        lines.append(_t("usage.tokens_unlimited", lang, used=usage.tokens))
+    lines.append(_t("usage.reset", lang, reset=reset, zone=zone))
+    await _safe_reply_text(update, "\n".join(lines))
+
+
 def _deletion_preview(update: Update, counts: dict[str, int]) -> str:
     """The exact list the user is about to confirm, in their language."""
     lines = [tr("deletemydata.preview_header", update)]
@@ -5580,6 +5671,18 @@ async def image_command(
             await update.message.reply_text(tr("image.usage_html", update), parse_mode="HTML")
         return
 
+    # Images are the most expensive thing Aura can do, so the per-user quota
+    # covers them too; a deployment that never sets a limit sees no change.
+    quota = check_user_quota(update)
+    if quota is not None:
+        await _safe_reply_text(update, quota_message(quota, update))
+        return
+    if update.effective_user and not is_privileged_user(update):
+        try:
+            USAGE_STORE.record_turn(update.effective_user.id)
+        except Exception:
+            logger.warning("Could not record a usage turn", exc_info=True)
+
     if editable_reply is not None:
         await _run_image_edit(update, context, prompt, source_message=editable_reply)
     else:
@@ -6158,6 +6261,15 @@ async def message_handler(
     if not text and not image_requested and not document_requested and not media_requested:
         return
 
+    # Quota gate. Checked before any local handler so the rule is easy to reason
+    # about ("every message that would reach the model"), and so a capped user
+    # cannot keep triggering reminders or weather lookups either. Commands such as
+    # /usage or /deletemydata are separate handlers and stay available.
+    quota = check_user_quota(update)
+    if quota is not None:
+        await _safe_reply_text(update, quota_message(quota, update))
+        return
+
     if text and not image_requested and not document_requested and not media_requested:
         if is_reminder_request(text):
             await _schedule_reminder(update, text, natural=True)
@@ -6595,6 +6707,14 @@ async def message_handler(
         if meme_client.is_enabled:
             sticker_context["image_delivery"] = image_delivery
 
+        # Counted immediately before the call, so a message that reaches the
+        # model is always paid for in the counter even if the call then fails.
+        if update.effective_user and not is_privileged_user(update):
+            try:
+                USAGE_STORE.record_turn(update.effective_user.id)
+            except Exception:
+                logger.warning("Could not record a usage turn", exc_info=True)
+
         answer, usage, tool_events = await asyncio.to_thread(
             ask_model,
             model,
@@ -6714,6 +6834,11 @@ async def message_handler(
                 "chat=%s model=%s total_tokens=%s",
                 history_id, model, usage["total_tokens"],
             )
+            if update.effective_user and not is_privileged_user(update):
+                try:
+                    USAGE_STORE.add_tokens(update.effective_user.id, int(usage["total_tokens"]))
+                except Exception:
+                    logger.warning("Could not record token usage", exc_info=True)
 
     except MediaInputError as exc:
         logger.info("Media input rejected | chat=%s | %s", history_id, exc)
@@ -6892,6 +7017,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("timezone", timezone_command))
     application.add_handler(CommandHandler("language", language_command))
     application.add_handler(CommandHandler("deletemydata", deletemydata_command))
+    application.add_handler(CommandHandler("usage", usage_command))
     # Owner/admin panel. The panel enforces its own access rules (founder plus
     # ADMIN_USER_IDS) and works in private chats only.
     application.add_handler(CommandHandler("admin", admin_panel_command))

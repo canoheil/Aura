@@ -55,6 +55,7 @@ CATEGORIES: tuple[Category, ...] = (
     Category("reminders", "reminders", "user_id"),
     Category("timezone", "reminder_timezones", "user_id"),
     Category("language", "user_language", "user_id"),
+    Category("usage", "user_usage", "user_id"),
 )
 
 

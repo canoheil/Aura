@@ -83,6 +83,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "/timezone [Asia/Tehran] — نمایش یا تغییر منطقهٔ زمانی یادآور\n"
             "/language — تغییر زبان\n"
             "/deletemydata — دیدن و پاک کردن همهٔ داده‌های شخصی\n"
+            "/usage — مصرف امروز و سهمیهٔ باقی‌مانده\n"
             "/whoami — نمایش Telegram ID و وضعیت سازنده"
         ),
         "en": (
@@ -107,6 +108,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "/timezone [Europe/Berlin] — show or change the reminder timezone\n"
             "/language — change the language\n"
             "/deletemydata — see and delete everything stored about you\n"
+            "/usage — today's usage and remaining allowance\n"
             "/whoami — show your Telegram ID and founder status"
         ),
     },
@@ -658,6 +660,27 @@ CATALOG: dict[str, dict[str, str]] = {
         "fa": "❌ یک خطای غیرمنتظره رخ داد. دوباره امتحان کن.",
         "en": "❌ An unexpected error occurred. Please try again.",
     },
+    # --- per-user quota -----------------------------------------------------
+    "quota.turns_reached": {
+        "fa": "⏳ سهمیهٔ امروزت تمام شده: {used} از {limit} پیام.\nسهمیه ساعت {reset} (به وقت {zone}) دوباره پر می‌شود.",
+        "en": "⏳ You have used today's allowance: {used} of {limit} messages.\nIt resets at {reset} ({zone}).",
+    },
+    "quota.tokens_reached": {
+        "fa": "⏳ سهمیهٔ امروزت تمام شده: {used} از {limit} توکن مصرف شده.\nسهمیه ساعت {reset} (به وقت {zone}) دوباره پر می‌شود.",
+        "en": "⏳ You have used today's allowance: {used} of {limit} tokens.\nIt resets at {reset} ({zone}).",
+    },
+    "usage.header": {
+        "fa": "📊 مصرف امروز تو (به وقت UTC):",
+        "en": "📊 Your usage today (UTC):",
+    },
+    "usage.turns": {"fa": "• پیام‌های مدل: {used} از {limit}", "en": "• Model messages: {used} of {limit}"},
+    "usage.turns_unlimited": {"fa": "• پیام‌های مدل: {used} (بدون سقف)", "en": "• Model messages: {used} (no limit)"},
+    "usage.tokens": {"fa": "• توکن‌ها: {used} از {limit}", "en": "• Tokens: {used} of {limit}"},
+    "usage.tokens_unlimited": {"fa": "• توکن‌ها: {used} (بدون سقف)", "en": "• Tokens: {used} (no limit)"},
+    "usage.reset": {
+        "fa": "\nشمارش فردا ساعت ۰۰:۰۰ UTC صفر می‌شود (به وقت تو: {reset}، {zone}).",
+        "en": "\nThe counter restarts at 00:00 UTC (your time: {reset}, {zone}).",
+    },
     # --- /deletemydata ------------------------------------------------------
     "deletemydata.private_only": {
         "fa": "این دستور فقط در چت خصوصی کار می‌کند. در گروه نمی‌توانم تاریخچهٔ گفتگو را پاک کنم، "
@@ -696,6 +719,10 @@ CATALOG: dict[str, dict[str, str]] = {
     "deletemydata.item.timezone": {
         "fa": "• منطقهٔ زمانی یادآورها: {count}",
         "en": "• Reminder timezone: {count}",
+    },
+    "deletemydata.item.usage": {
+        "fa": "• شمارندهٔ مصرف: {count}",
+        "en": "• Usage counter: {count}",
     },
     "deletemydata.item.language": {
         "fa": "• زبان انتخابی: {count}",

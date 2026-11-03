@@ -31,6 +31,9 @@ CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_user_id INTEG
     expires_at INTEGER, active INTEGER NOT NULL DEFAULT 1, UNIQUE(owner_user_id, memory_key));
 CREATE TABLE user_language (user_id INTEGER PRIMARY KEY, language TEXT NOT NULL,
     updated_at INTEGER NOT NULL);
+CREATE TABLE user_usage (user_id INTEGER NOT NULL, usage_date TEXT NOT NULL,
+    turns INTEGER NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL, PRIMARY KEY (user_id, usage_date));
 """
 
 
@@ -61,6 +64,8 @@ def _populated_db(user_id=7, other_id=8):
         db.execute("INSERT INTO memories (owner_user_id, memory_type, content, memory_key, created_at, updated_at)"
                    " VALUES (?, 'explicit', 'likes tea', 'tea', 0, 0)", (uid,))
         db.execute("INSERT INTO user_language (user_id, language, updated_at) VALUES (?, 'en', 0)", (uid,))
+        db.execute("INSERT INTO user_usage (user_id, usage_date, turns, tokens, updated_at)"
+                   " VALUES (?, '2026-01-01', 3, 0, 0)", (uid,))
         store.set_timezone(uid, "Europe/Berlin")
         store.create(uid, uid, ReminderSpec(due_utc=due, text="drink water", timezone="Europe/Berlin"))
     db.commit()
@@ -71,6 +76,7 @@ def test_every_personal_table_is_covered():
     keys = {category.key for category in CATEGORIES}
     assert keys == {
         "messages", "model", "summary", "video", "memories", "reminders", "timezone", "language",
+        "usage",
     }
 
 
@@ -88,7 +94,8 @@ def test_the_plan_counts_only_this_user():
     assert counts["memories"] == 1
     assert counts["reminders"] == 1
     assert counts["language"] == 1
-    assert total(counts) == 9
+    assert counts["usage"] == 1
+    assert total(counts) == 10
 
 
 def test_deletion_removes_only_this_user_and_reports_counts():

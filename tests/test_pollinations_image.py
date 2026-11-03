@@ -20,6 +20,9 @@ from pollinations_image import (
     image_dimensions,
 )
 
+# Tests live in tests/; the application modules stay at the repository root.
+ROOT = Path(__file__).resolve().parent.parent
+
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + (b"0" * 256) + b"\xff\xd9"
 
 
@@ -452,7 +455,7 @@ def test_image_command_prompt_parsing():
 
 
 def test_bot_wires_image_tool_command_and_delivery():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = (ROOT / "bot.py").read_text(encoding="utf-8")
     assert 'name="generate_image"' in source
     assert "def _tool_generate_image(" in source
     assert 'CommandHandler("image", image_command)' in source
@@ -466,6 +469,6 @@ def test_bot_wires_image_tool_command_and_delivery():
 
 
 def test_pollinations_client_is_injected_only_when_configured():
-    source = Path("bot.py").read_text(encoding="utf-8")
+    source = (ROOT / "bot.py").read_text(encoding="utf-8")
     assert "if pollinations_client.is_configured:" in source
     assert "if pollinations_client.is_configured:\n        registry.register(" in source

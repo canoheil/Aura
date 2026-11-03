@@ -21,11 +21,10 @@ uses fake Telegram/Gemini clients.
 ## Running the tests
 
 ```bash
-cd /path/to/Aura              # run from the repository root: a few tests read
-                              # bot.py / requirements.txt by relative path
-python -m pytest              # whole suite
-python -m pytest test_answer_quality.py -v
-python -m pytest -k reminder  # a subset
+cd /path/to/Aura                     # any working directory works
+python -m pytest                     # whole suite
+python -m pytest tests/test_answer_quality.py -v
+python -m pytest -k reminder         # a subset
 ```
 
 Everything must pass before a pull request is merged; CI runs the same command.
@@ -78,9 +77,11 @@ commit `.env`, `bot.db`, `.aura_secret_key` or any other database file, even whe
 | `telegram_formatting.py` | HTML rendering and chunking |
 | `*_image.py`, `weather_api.py`, `meme_api.py`, `sticker_manager.py` | Optional capabilities |
 
-Tests currently live beside the modules (`test_*.py`) because the application is
-a flat module set. Moving them under `tests/` is a welcome refactor, but do it in
-its own pull request.
+Application modules stay flat at the repository root; the tests live in `tests/`,
+one `test_*.py` file per module or feature. `pyproject.toml` adds the repository
+root to `sys.path`, so a test imports `bot`, `i18n` or `reminders` directly, and
+reads committed files through a module-level `ROOT` path
+(`Path(__file__).resolve().parent.parent`) rather than the current directory.
 
 ## Style
 

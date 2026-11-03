@@ -13,7 +13,7 @@ import pytest
 import meme_api
 from meme_api import Meme, MemeClient, MemeError
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 
 # ---------- helpers ----------

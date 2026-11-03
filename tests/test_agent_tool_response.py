@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 from google.genai import types
-
 from test_freshness_policy import _agent_namespace
+
 from tool_system import AgentRunner, ToolRegistry, has_textual_tool_declaration
 
 RAW_DECLARATION = (
@@ -378,7 +378,7 @@ def isolated_bot(monkeypatch):
     with monkeypatch.context() as setup:
         setup.setattr(sqlite3, "connect", lambda _path, **kw: real_connect(":memory:", **kw))
         setup.setattr(genai, "Client", lambda **_kw: client)
-        spec = importlib.util.spec_from_file_location("_isolated_aura_bot", Path(__file__).with_name("bot.py"))
+        spec = importlib.util.spec_from_file_location("_isolated_aura_bot", Path(__file__).resolve().parent.parent / "bot.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
     yield module, client

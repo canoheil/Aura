@@ -1,7 +1,7 @@
 import ast
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 BOT = ROOT / "bot.py"
 
 def _source():

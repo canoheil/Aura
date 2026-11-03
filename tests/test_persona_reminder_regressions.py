@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 from test_agent_tool_response import _telegram_update, _text_response
 
 

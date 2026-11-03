@@ -579,9 +579,12 @@ ruff check .
 
 Everything must pass before a pull request is merged; the same commands run in CI
 (`.github/workflows/tests.yml`), and a failing lint job stops the build before the
-test job spends time on dependencies. Tests live next to the modules they cover
-and are named `test_*.py`. When you change behavior, add a test that fails without
-your fix.
+test job spends time on dependencies. Tests live in `tests/` and are named
+`test_*.py`; `pyproject.toml` puts the repository root on `sys.path`, so a test
+imports the flat application modules directly (`import i18n`), and tests that read
+`bot.py` or `.env.example` resolve them from the repository root rather than from
+the current directory — the suite passes from any working directory. When you
+change behavior, add a test that fails without your fix.
 
 Tool configuration lives in `pyproject.toml` (pytest and ruff); `ruff` lints but
 does not reformat, so a pull request shows only its own changes. Optional

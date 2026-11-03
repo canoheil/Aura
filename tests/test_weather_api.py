@@ -15,8 +15,9 @@ import types as pytypes
 import unittest
 from unittest import mock
 
-# Match the repo's convention: import the local module under test.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Tests live in tests/; the application modules stay at the repository root.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 import weather_api  # noqa: E402
 
 
@@ -428,7 +429,7 @@ class BotWiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        root = os.path.dirname(os.path.abspath(__file__))
+        root = ROOT
         with open(os.path.join(root, "bot.py"), encoding="utf-8") as fh:
             cls.source = fh.read()
         cls.tree = ast.parse(cls.source)
@@ -546,7 +547,7 @@ class BotWiringTests(unittest.TestCase):
         self.assertNotIn("cache_results=False", weather_block)
 
     def test_env_example_documents_weather(self):
-        root = os.path.dirname(os.path.abspath(__file__))
+        root = ROOT
         with open(os.path.join(root, ".env.example"), encoding="utf-8") as fh:
             env = fh.read()
         for var in (

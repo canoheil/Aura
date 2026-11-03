@@ -1,14 +1,15 @@
 """Reading stickers: which file is sent, how it is described, and the handlers."""
 import asyncio
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from test_agent_tool_response import _telegram_update, _text_response
 
 import sticker_vision
 from sticker_vision import StickerPlan, describe_for_model, plan_sticker, sniff_image_mime
-from test_agent_tool_response import _telegram_update, _text_response
 
 PERSIAN = re.compile("[\u0600-\u06FF]")
 
@@ -291,5 +292,5 @@ def test_an_addressed_sticker_in_a_group_is_still_answered(isolated_bot):
 
 def test_the_handler_now_receives_stickers():
     """Filtering matters: without this the handler never sees a sticker at all."""
-    source = open("bot.py", encoding="utf-8").read()
+    source = (Path(__file__).resolve().parent.parent / "bot.py").read_text(encoding="utf-8")
     assert "filters.Sticker.ALL" in source

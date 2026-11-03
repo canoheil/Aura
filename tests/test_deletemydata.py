@@ -3,13 +3,14 @@ import asyncio
 import re
 import sqlite3
 import threading
+from pathlib import Path
 
 import pytest
+from test_agent_tool_response import _telegram_update
 
 import data_deletion
 import i18n
 from data_deletion import CATEGORIES, delete, plan, total
-from test_agent_tool_response import _telegram_update
 
 PERSIAN = re.compile("[\u0600-\u06FF]")
 
@@ -260,7 +261,7 @@ def test_the_final_reply_keeps_the_language_that_was_just_deleted(isolated_bot):
 
 
 def test_the_command_is_registered():
-    source = open("bot.py", encoding="utf-8").read()
+    source = (Path(__file__).resolve().parent.parent / "bot.py").read_text(encoding="utf-8")
     assert 'CommandHandler("deletemydata", deletemydata_command)' in source
 
 

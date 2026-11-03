@@ -1,7 +1,7 @@
 import ast
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def _imported_names(tree: ast.AST) -> set[str]:

@@ -12,6 +12,9 @@ from reaction_manager import ReactionManager
 from reply_context import build_reply_context, build_request_with_reply_context
 from telegram_formatting import render_telegram_html, split_telegram_html, strip_formatting
 
+# Tests live in tests/; the application modules stay at the repository root.
+ROOT = Path(__file__).resolve().parent.parent
+
 
 def test_project_has_expected_core_modules():
     expected = {
@@ -19,11 +22,11 @@ def test_project_has_expected_core_modules():
         "telegram_formatting.py", "error_handling.py", "retry_policy.py",
         "health_check.py",
     }
-    assert expected.issubset({p.name for p in Path(".").glob("*.py")})
+    assert expected.issubset({p.name for p in ROOT.glob("*.py")})
 
 
 def test_all_python_modules_parse():
-    for path in Path(".").glob("*.py"):
+    for path in ROOT.glob("*.py"):
         ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
 
@@ -86,11 +89,11 @@ def test_reaction_manager_has_conservative_candidate_gate():
 
 def test_no_sensitive_files_are_in_project_tree():
     forbidden = {".env", "bot.db", "bot.db-shm", "bot.db-wal"}
-    found = {p.name for p in Path(".").iterdir() if p.name in forbidden}
+    found = {p.name for p in ROOT.iterdir() if p.name in forbidden}
     assert not found
 
 
 def test_stage17_does_not_modify_existing_test_inventory():
-    tests = sorted(p.name for p in Path(".").glob("test_*.py"))
+    tests = sorted(p.name for p in (ROOT / "tests").glob("test_*.py"))
     assert "test_stage17_comprehensive.py" in tests
     assert len(tests) >= 10

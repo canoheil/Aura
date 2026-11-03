@@ -2,11 +2,11 @@
 # This lock is intentionally separate from requirements.txt so deployment can
 # review/confirm the target environment before changing installed packages.
 python-telegram-bot==22.8
-python-dotenv==1.2.3
+python-dotenv==1.2.4
 requests==2.34.2
 cryptography==46.0.7
-google-genai==2.23.0
-pypdf==6.18.1
+google-genai==2.34.0
+pypdf==6.21.4
 python-docx==1.2.0
 openpyxl==3.1.5
 python-pptx==1.0.2

@@ -83,6 +83,7 @@ OPENAI_MODEL=gpt-4o-mini
 
 - `BOT_NAME`
 - `BOT_LANGUAGE`
+- `OWNER_NAME`
 - `FOUNDER_USER_ID`
 - `YOU_API_KEY`
 - `WEB_SEARCH_ENABLED`
@@ -204,6 +205,27 @@ Secrets are never echoed back. `/admin show` prints a mask such as
 installed (`pip install -r requirements.txt` installs it). If you rotate
 `AURA_SECRET_KEY`, stored keys become unreadable and must be re-entered —
 environment keys are unaffected.
+
+## Owner name (optional)
+
+Aura does not need to know who you are to work, but a self-hosted deployment can
+tell her your name:
+
+```bash
+OWNER_NAME=Sara
+```
+
+or, at runtime, `/admin set owner_name Sara`. When the value is set, Aura uses
+that name when she talks about her owner. When it is empty — the default — she
+simply has no name: the prompt tells her so explicitly, because a model that is
+not told will invent a plausible one. An unset, blank or unusable value (only
+punctuation, control characters, more than 60 characters) is treated as empty
+and never breaks a reply.
+
+The name is a label, not a credential: it never proves who is speaking, grants
+no permissions, and does not change founder verification, which stays tied to
+`FOUNDER_USER_ID`. It is not translated, shortened or replaced by a nickname,
+and a user cannot set it by claiming to be the owner in chat.
 
 ## Languages
 

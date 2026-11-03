@@ -831,6 +831,41 @@ def user_language(update: Optional[Update] = None, user_id: Optional[int] = None
     )
 
 
+OWNER_NAME_MAX_CHARS = 60
+_OWNER_NAME_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+def _clean_owner_name(value: Optional[str]) -> str:
+    """Normalize an optional owner name into a single safe prompt line.
+
+    The name is deployment configuration, not user input, but it still ends up
+    inside the system prompt: strip control and bidi characters, collapse
+    whitespace, bound the length, and reject anything with no letter or digit so
+    a stray value like "—" cannot become a name.
+    """
+    text = _OWNER_NAME_CONTROLS.sub(" ", str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text[:OWNER_NAME_MAX_CHARS].strip()
+    return text if any(char.isalnum() for char in text) else ""
+
+
+def owner_name() -> str:
+    """The deployment's optional owner name; empty means "not configured".
+
+    This is never required. An unset, blank or unusable value simply leaves Aura
+    without a name, which the prompt states explicitly so she never guesses one.
+    ``/admin set owner_name`` (or ``OWNER_NAME``) is the supported path; the
+    lowercase spelling ``owner_name`` is accepted too, because environment
+    variables are case-sensitive and that is the documented spelling as well.
+    """
+    configured = _clean_owner_name(SETTINGS.get("owner_name"))
+    if configured:
+        return configured
+    if not SETTINGS.is_overridden("owner_name"):
+        return _clean_owner_name(os.getenv("owner_name", ""))
+    return ""
+
+
 def tr(key: str, update: Optional[Update] = None, **values) -> str:
     """Translate a user-facing string for the current user."""
     return _t(key, user_language(update), **values)
@@ -1032,7 +1067,7 @@ def build_system_prompt(update: Optional[Update] = None, *, chat_id: Optional[in
     # The interface language is an application setting, not something the model
     # should infer from a single message.
     interface_language = user_language(update, user_id=user_id)
-    aura_identity = AuraIdentity(model=configured_model)
+    aura_identity = AuraIdentity(model=configured_model, owner_name=owner_name())
     prompt = SYSTEM_PROMPT + "\n\n" + i18n.system_instruction(interface_language)
     prompt += "\n\n" + aura_identity.system_context(FOUNDER_USER_ID)
     prompt += "\n\n" + AuraSelfIdentityBoundary().system_context()

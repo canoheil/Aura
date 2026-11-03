@@ -177,7 +177,7 @@ def test_a_failing_step_rolls_back_completely():
     db = _db()
     db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
     db.commit()
-    registry = (migrations.MIGRATIONS[0], Migration(version=99, name="boom", apply=boom))
+    registry = (*migrations.MIGRATIONS, Migration(version=migrations.LATEST_VERSION + 50, name="boom", apply=boom))
 
     with pytest.raises(MigrationError) as excinfo:
         migrate(db, migrations=registry)
@@ -196,11 +196,12 @@ def test_a_failed_step_can_be_retried():
         raise RuntimeError("transient")
 
     with pytest.raises(MigrationError):
-        migrate(db, migrations=(migrations.MIGRATIONS[0], Migration(version=50, name="boom", apply=boom)))
+        migrate(db, migrations=(*migrations.MIGRATIONS, Migration(version=migrations.LATEST_VERSION + 50, name="boom", apply=boom)))
 
-    fixed = Migration(version=50, name="fixed", apply=lambda conn: conn.execute("ALTER TABLE t ADD COLUMN ok TEXT"))
-    applied = migrate(db, migrations=(migrations.MIGRATIONS[0], fixed))
-    assert [(m.version, m.name) for m in applied] == [(50, "fixed")]
+    fixed = Migration(version=migrations.LATEST_VERSION + 50, name="fixed",
+                      apply=lambda conn: conn.execute("ALTER TABLE t ADD COLUMN ok TEXT"))
+    applied = migrate(db, migrations=(*migrations.MIGRATIONS, fixed))
+    assert [(m.version, m.name) for m in applied] == [(fixed.version, "fixed")]
     assert "ok" in _columns(db, "t")
 
 
@@ -212,8 +213,8 @@ def test_a_callers_transaction_is_never_committed_behind_its_back():
     db.execute("INSERT INTO t (id) VALUES (1)")  # opens an implicit transaction
     assert db.in_transaction is True
 
-    applied = migrate(db, migrations=(migrations.MIGRATIONS[0],))
-    assert [m.version for m in applied] == [1]
+    applied = migrate(db, migrations=migrations.MIGRATIONS)
+    assert [m.version for m in applied] == [m.version for m in migrations.MIGRATIONS]
     # The caller still owns the transaction, and the migration is visible in it.
     assert db.in_transaction is True
     assert schema_version(db) == migrations.LATEST_VERSION
@@ -235,7 +236,7 @@ def test_a_failed_step_inside_a_callers_transaction_keeps_the_outer_work():
         raise RuntimeError("nope")
 
     with pytest.raises(MigrationError):
-        migrate(db, migrations=(migrations.MIGRATIONS[0], Migration(version=51, name="boom", apply=boom)))
+        migrate(db, migrations=(*migrations.MIGRATIONS, Migration(version=migrations.LATEST_VERSION + 51, name="boom", apply=boom)))
     # Only the failed savepoint was undone; the caller's insert is still there.
     assert db.in_transaction is True
     assert db.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 1

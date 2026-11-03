@@ -87,11 +87,47 @@ def ensure_reminder_recipient_column(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE reminders ADD COLUMN recipient_name TEXT NOT NULL DEFAULT ''")
 
 
+def ensure_reminder_recurrence_columns(db: sqlite3.Connection) -> None:
+    """Add the three columns that let a reminder belong to a repeating series.
+
+    ``recurrence`` holds the rule (``daily@08:00``); ``series_id`` groups the
+    occurrences of one series and is the id of its first row; ``occurrence``
+    counts how many times that series has fired, which is what makes an
+    accidental double-insert visible in the data instead of invisible;
+    ``anchor_utc`` is the instant the rule produced, before any snooze.
+    """
+    tables = {
+        row[0] if not isinstance(row, sqlite3.Row) else row["name"]
+        for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "reminders" not in tables:
+        return
+    columns = {
+        row[1] if not isinstance(row, sqlite3.Row) else row["name"]
+        for row in db.execute("PRAGMA table_info(reminders)")
+    }
+    if "recurrence" not in columns:
+        db.execute("ALTER TABLE reminders ADD COLUMN recurrence TEXT NOT NULL DEFAULT ''")
+    if "series_id" not in columns:
+        db.execute("ALTER TABLE reminders ADD COLUMN series_id INTEGER NOT NULL DEFAULT 0")
+    if "occurrence" not in columns:
+        db.execute("ALTER TABLE reminders ADD COLUMN occurrence INTEGER NOT NULL DEFAULT 0")
+    if "anchor_utc" not in columns:
+        # The instant the rule said, kept apart from ``due_utc`` so a snooze —
+        # which moves one delivery by ten minutes — cannot drift the series.
+        db.execute("ALTER TABLE reminders ADD COLUMN anchor_utc INTEGER NOT NULL DEFAULT 0")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
         name="baseline",
         apply=ensure_reminder_recipient_column,
+    ),
+    Migration(
+        version=2,
+        name="recurring-reminders",
+        apply=ensure_reminder_recurrence_columns,
     ),
 )
 

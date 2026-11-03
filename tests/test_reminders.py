@@ -48,7 +48,7 @@ def test_commands_support_gregorian_relative_and_explicit_offsets():
 @pytest.mark.parametrize("text,natural", [
     ("یادم بنداز", True),
     ("یادم بنداز ۲ ساعت ورزش کنم", True),
-    ("هر روز ساعت ۹ یادم بنداز آب بخورم", True),
+    ("هر سال ساعت ۹ یادم بنداز آب بخورم", True),
     ("10m", False),
     ("2026-02-31 09:00 invalid", False),
     ("2026-10-01 09:00 too late", False),

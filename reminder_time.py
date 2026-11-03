@@ -41,6 +41,9 @@ class ReminderSpec:
     due_utc: datetime
     text: str
     timezone: str
+    # ``""`` for a one-shot reminder; otherwise the rule from `recurrence.py`,
+    # e.g. ``daily@08:00`` or ``weekly@19:30:5``.
+    recurrence: str = ""
 
 
 # --- normalization ----------------------------------------------------------
@@ -388,6 +391,11 @@ def _has_explicit_affix(candidate: TimeCandidate) -> bool:
 
 # --- resolution -------------------------------------------------------------
 
+def local_to_utc(local: datetime, zone: ZoneInfo) -> datetime:
+    """Public alias: recurrence resolves wall clocks through the same rules."""
+    return _local_to_utc(local, zone)
+
+
 def _local_to_utc(local: datetime, zone: ZoneInfo) -> datetime:
     """Reject missing/repeated local times rather than choosing a DST fold."""
     options = []
@@ -492,9 +500,76 @@ def _message_without_spans(original: str, spans: list[tuple[int, int]]) -> str:
     return text
 
 
+_ABSOLUTE_DATE = re.compile(r"(?<!\d)\d{4}[-/]\d{1,2}[-/]\d{1,2}(?!\d)")
+
+
+def _recurrence_phrase(value: str):
+    """Import lazily: `recurrence` reads this module's grammar and cannot cycle."""
+    from recurrence import find_recurrence_phrase
+
+    return find_recurrence_phrase(value)
+
+
+def _parse_recurring(original: str, value: str, phrase, zone, current: datetime,
+                     trigger: Optional[re.Match]) -> ReminderSpec:
+    """A repeating request: the rule supplies the day, the clock supplies the time.
+
+    The recurring words are blanked out (same length, so every other span still
+    points at the original) and what remains is read for its clock. That is what
+    lets «هر شنبه ساعت ۱۰» take Saturday from the rule and 10:00 from the clock
+    without either half having to understand the other.
+    """
+    from recurrence import finalize
+
+    masked = value[:phrase.span[0]] + " " * (phrase.span[1] - phrase.span[0]) + value[phrase.span[1]:]
+    if _ABSOLUTE_DATE.search(masked):
+        raise ReminderError(
+            "برای یادآور تکراری یک ساعت کافی است، نه تاریخ؛ مثلاً «هر روز ساعت ۹ صبح».",
+            code="recurring_date",
+        )
+    candidates = [c for c in time_candidates(masked)]
+    if not candidates:
+        raise ReminderError("چه ساعتی؟ مثلاً «۹ صبح» یا «۱۷:۳۰».", code="missing_clock",
+                            fragment=original[phrase.span[0]:phrase.span[1]].strip())
+    if len(candidates) > 1:
+        raise ReminderError(
+            "زمان یادآوری را دقیق بگو؛ مثلاً «۱۰ دقیقه دیگه یادم بنداز آب بخورم» "
+            "یا /remind 2026-11-01 09:30 آب بخورم (تاریخ میلادی).",
+            code="ambiguous_time",
+        )
+    candidate = candidates[0]
+    if candidate.kind in {"relative", "compound"}:
+        raise ReminderError(
+            "برای یادآور تکراری باید ساعت را بگویی، نه «چند دقیقه دیگه»؛ مثلاً «هر روز ساعت ۸ صبح».",
+            code="recurring_time",
+        )
+    if candidate.kind == "absolute":
+        raise ReminderError(
+            "برای یادآور تکراری یک ساعت کافی است، نه تاریخ؛ مثلاً «هر روز ساعت ۹ صبح».",
+            code="recurring_date",
+        )
+    hour, minute, _second, meridiem = _clock_fields(candidate.match)
+    hour, rollover = _apply_meridiem(hour, meridiem)
+    if rollover:
+        raise ReminderError("چه ساعتی؟ مثلاً «۱۲:۳۰ بامداد» یا «۲۳:۳۰».", code="missing_clock")
+
+    rule = finalize(phrase, zone=zone, now_utc=current, hour=hour, minute=minute)
+    due = rule.first_after(current, zone)
+
+    spans = [phrase.span, (candidate.start, candidate.end)]
+    if trigger:
+        spans.append(trigger.span())
+    content = _message_without_spans(original, spans)
+    if not content:
+        raise ReminderError("چه چیزی را یادآوری کنم؟ متن یادآوری را هم بفرست.", code="missing_task")
+    if len(content) > MAX_TEXT_LENGTH:
+        raise ReminderError(f"متن یادآوری خیلی طولانی است؛ حداکثر {MAX_TEXT_LENGTH} کاراکتر.", code="text_too_long")
+    return ReminderSpec(due_utc=due, text=content, timezone=zone.key, recurrence=str(rule))
+
+
 def parse_reminder(text: str, zone_name: str, *, now: Optional[datetime] = None,
                    natural: bool = False) -> ReminderSpec:
-    """Parse a conservative one-shot request without inventing dates or tasks."""
+    """Parse a conservative request without inventing dates, repeats or tasks."""
     original = str(text or "").strip()
     value = _normalized(original)
     zone = timezone_for(zone_name)
@@ -506,8 +581,16 @@ def parse_reminder(text: str, zone_name: str, *, now: Optional[datetime] = None,
     trigger = _TRIGGER.search(value)
     if natural and not trigger:
         raise ReminderError("درخواست یادآوری مشخص نیست.", code="missing_intent")
-    if _RECURRING.search(value):
-        raise ReminderError("یادآور تکراری فعلاً پشتیبانی نمی‌شود؛ می‌توانی یک یادآور یک‌باره ثبت کنی.", code="recurring")
+    from recurrence import is_unsupported_recurrence
+
+    if is_unsupported_recurrence(value):
+        raise ReminderError(
+            "یادآور سالانه را پشتیبانی نمی‌کنم؛ روزانه، هفتگی یا ماهانه را می‌توانم ثبت کنم.",
+            code="recurring_yearly",
+        )
+    recurring = _recurrence_phrase(value)
+    if recurring is not None:
+        return _parse_recurring(original, value, recurring, zone, current, trigger)
     if _UNSAFE_NUMBER.search(value):
         raise ReminderError("زمان را با عدد مثبت و واضح بگو؛ هنوز چیزی ثبت نکردم.", code="ambiguous_time")
 
@@ -649,7 +732,16 @@ def ambiguous_reminder_source(text: str) -> bool:
 
 
 def has_recurring_reminder(text: str) -> bool:
-    return bool(_RECURRING.search(_normalized(text)))
+    """Whether the sentence asks for a repeat this build can actually schedule.
+
+    «هر سال» is a recurring wish and an unsupported rule; the model path must
+    not turn it into a one-shot reminder, but it must not be described as
+    unsupported repetition either. So this asks the same reader the parser
+    uses, not a looser pattern.
+    """
+    from recurrence import find_recurrence_phrase, is_unsupported_recurrence
+
+    return is_unsupported_recurrence(text) or find_recurrence_phrase(text) is not None
 
 
 def is_reminder_request(text: str) -> bool:

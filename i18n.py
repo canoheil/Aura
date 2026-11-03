@@ -77,7 +77,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "/remember <text> — ذخیره در حافظه\n"
             "/forget <text> — حذف از حافظه\n"
             "/image <prompt> — ساخت عکس (یا ادیت عکسی که روی آن ریپلای می‌کنی)\n"
-            "/remind <زمان> <متن> — ثبت یادآور یک‌باره\n"
+            "/remind <زمان> <متن> — ثبت یادآور (یک‌باره یا تکراری)\n"
             "/reminders — فهرست یادآورها\n"
             "/cancelreminder <id> — لغو یادآور\n"
             "/timezone [Asia/Tehran] — نمایش یا تغییر منطقهٔ زمانی یادآور\n"
@@ -251,12 +251,14 @@ CATALOG: dict[str, dict[str, str]] = {
             "زمان و متن یادآوری را بفرست؛ مثلاً:\n"
             "یادم بنداز فردا ساعت ۹ صبح قرص بخورم\n"
             "یادم بنداز یک ساعت و نیم دیگه چای دم کنم\n"
+            "یادم بنداز هر روز ساعت ۸ صبح قرص بخورم\n"
             "/remind in 10m آب بخور — /remind 2026-11-01 09:30 جلسه\n"
             "منطقهٔ زمانی: /timezone"
         ),
         "en": (
             "Send a time and the reminder text, for example:\n"
             "/remind in 10m drink water\n/remind 2026-11-01 09:30 meeting\n"
+            "Every day at 8am, remind me to take the pills\n"
             "Dates are Gregorian. Timezone: /timezone"
         ),
     },
@@ -278,6 +280,24 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "That reminder is no longer active; nothing to do.",
     },
     "reminder.callback.done": {"fa": "انجامش دادی؛ ثبت شد.", "en": "Marked as done."},
+    "reminder.button.skip": {"fa": "🔂 این یکی رو رد کن", "en": "🔂 Skip the next one"},
+    "reminder.button.stop_repeating": {"fa": "⏹ تکرار رو متوقف کن", "en": "⏹ Stop repeating"},
+    "reminder.callback.skipped": {
+        "fa": "باشه؛ تکرار بعدی {when}.",
+        "en": "Fine — the next one is {when}.",
+    },
+    "reminder.callback.repeat_stopped": {
+        "fa": "تکرارش رو متوقف کردم؛ این یادآور دیگر نمی‌آید.",
+        "en": "Stopped repeating; this reminder won't come back.",
+    },
+    "reminder.callback.skip_done": {
+        "fa": "این یکی دیگر تکرار نمی‌شود؛ تکرار بعدی {when}.",
+        "en": "Not this one; the next repeat is {when}.",
+    },
+    "reminder.callback.not_repeating": {
+        "fa": "این یک یادآور یک‌باره است؛ تکرار ندارد.",
+        "en": "This reminder doesn't repeat.",
+    },
     "reminder.callback.snoozed": {
         "fa": "باشه، {when} دوباره یادت می‌ندازم.",
         "en": "Okay — I'll remind you again {when}.",
@@ -289,6 +309,14 @@ CATALOG: dict[str, dict[str, str]] = {
     },
     "reminder.delivery.done_mark": {"fa": "✅ انجام شد", "en": "✅ Done"},
     "reminder.delivery.cancelled_mark": {"fa": "✖️ لغو شد", "en": "✖️ Cancelled"},
+    "reminder.delivery.repeat_stopped_mark": {
+        "fa": "⏹ تکرار متوقف شد",
+        "en": "⏹ Stopped repeating",
+    },
+    "reminder.delivery.skipped_mark": {
+        "fa": "🔂 تکرار بعدی: {when}",
+        "en": "🔂 Next repeat: {when}",
+    },
     "reminder.delivery.snoozed_mark": {
         "fa": "⏰ برای {when} دوباره تنظیم شد",
         "en": "⏰ Moved to {when}",
@@ -342,9 +370,28 @@ CATALOG: dict[str, dict[str, str]] = {
         "fa": "درخواست یادآوری مشخص نیست؛ چیزی ثبت نکردم.",
         "en": "That reminder request is not clear; nothing has been scheduled.",
     },
+    "reminder.err.recurring_yearly": {
+        "fa": "یادآور سالانه را پشتیبانی نمی‌کنم؛ روزانه، هفتگی یا ماهانه را می‌توانم ثبت کنم.",
+        "en": "I can't schedule a yearly reminder; I can do daily, weekly or monthly.",
+    },
+    "reminder.err.recurring_time": {
+        "fa": "برای یادآور تکراری باید ساعت را بگویی، نه «چند دقیقه دیگه»؛ مثلاً «هر روز ساعت ۸ صبح».",
+        "en": "A repeating reminder needs a clock, not \"in ten minutes\" — for example "
+              "\"every day at 8am\".",
+    },
+    "reminder.err.recurring_date": {
+        "fa": "برای یادآور تکراری یک ساعت کافی است، نه تاریخ؛ مثلاً «هر روز ساعت ۹ صبح».",
+        "en": "A repeating reminder needs a clock rather than a date — for example "
+              "\"every day at 9am\".",
+    },
+    "reminder.err.recurring_weekdays": {
+        "fa": "«هر چند هفته» فقط با یک روز هفته ثبت می‌شود؛ مثلاً «هر دو هفته شنبه».",
+        "en": "\"Every few weeks\" takes a single weekday — for example \"every two weeks on Saturday\".",
+    },
     "reminder.err.recurring": {
-        "fa": "یادآور تکراری فعلاً پشتیبانی نمی‌شود.",
-        "en": "Repeating reminders are not supported yet.",
+        "fa": "برای یادآور تکراری ساعتش را هم بگو؛ مثلاً «هر روز ساعت ۸ صبح قرص بخورم».",
+        "en": "For a repeating reminder, include the clock too — for example "
+              "\"every day at 8am, take the pills\".",
     },
     "reminder.err.invalid_timezone": {
         "fa": "منطقهٔ زمانی معتبر نیست؛ مثلاً Asia/Tehran یا Europe/Berlin بفرست.",
@@ -406,6 +453,7 @@ CATALOG: dict[str, dict[str, str]] = {
         "fa": "تعداد یادآورهای فعال به سقف مجاز رسیده است؛ یکی را لغو کن.",
         "en": "You have reached the maximum number of active reminders; cancel one first.",
     },
+    "reminder.repeats": {"fa": "🔁 تکرار: {rule}", "en": "🔁 Repeats: {rule}"},
     "reminder.delivery.fallback": {"fa": "یادت نره: {task}", "en": "Reminder: {task}"},
     "reminder.delivery.recipient": {"fa": "دوست من", "en": "friend"},
     "weather.err.unavailable": {

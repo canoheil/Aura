@@ -129,6 +129,15 @@ SPECS: tuple[SettingSpec, ...] = (
     _spec("context_manager_enabled", "true", kind="bool", group="features", env="CONTEXT_MANAGER_ENABLED",
           label="Rolling conversation summary"),
 
+    # --- identity -----------------------------------------------------------
+    # Optional by design: a deployment that never sets a name must behave
+    # exactly like one that does, minus the name. Empty means "not known".
+    _spec("owner_name", "", kind="text", group="identity", env="OWNER_NAME",
+          label="Owner name",
+          help="Display name of the person who owns this deployment. Aura uses it when "
+               "she talks about you. Leave it empty and she simply does not claim to "
+               "know a name; she never invents one."),
+
     # --- behaviour ----------------------------------------------------------
     _spec("bot_language", "fa", kind="choice", group="behaviour", env="BOT_LANGUAGE",
           label="Bot language", choices=("fa", "en"),

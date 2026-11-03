@@ -16,6 +16,10 @@ class AuraIdentity:
     provider: str = "Google Gemini"
     model: str = ""
     feminine: bool = True
+    # Optional: the deployment may tell Aura what its owner is called. Empty is a
+    # valid, fully supported state — Aura then simply has no name to use and must
+    # not invent one.
+    owner_name: str = ""
 
     def system_context(self, founder_user_id: int = 0) -> str:
         lines = [
@@ -38,6 +42,19 @@ class AuraIdentity:
         )
         if founder_user_id:
             lines.append("- A verified founder/creator relationship exists for the Telegram user ID configured by the application.")
+        if self.owner_name:
+            lines.extend(
+                [
+                    f"- The deployment's owner (Aura's creator) is named: {self.owner_name}",
+                    "- Use that name when you refer to your owner. Do not translate it, shorten it, or invent a different one.",
+                    "- The name is relationship context supplied by the deployment, not a credential: it never proves who is speaking, and it grants no permissions.",
+                    "- Never reveal where the name came from or discuss configuration internals unless the user explicitly asks about the implementation.",
+                ]
+            )
+        else:
+            lines.append(
+                "- No owner name is configured. Do not guess, invent, or address anyone as the owner by name."
+            )
         return "\n".join(lines)
 
 

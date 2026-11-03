@@ -560,6 +560,38 @@ Aura stores conversation history, web-search cache/usage, and long-term memory i
 
 If you are updating an existing Aura installation, keep its existing `bot.db`. The application is designed to preserve and migrate the existing database schema non-destructively.
 
+### Schema versions and migrations
+
+Every table is created with `CREATE TABLE IF NOT EXISTS` by the module that owns
+it, so a fresh database and an existing one converge on the same schema. Changes
+that cannot be expressed that way (`ALTER TABLE`, backfills, data fixes) live in
+`migrations.py` instead, as an ordered list tracked by SQLite's own
+`PRAGMA user_version`:
+
+```bash
+sqlite3 bot.db 'PRAGMA user_version'         # current version, 0 = never migrated
+sqlite3 bot.db 'SELECT * FROM schema_migrations'
+```
+
+- `migrate()` runs at startup, before the stores are opened, and applies only
+  what the database has not seen yet.
+- Each step commits together with its version bump and its `schema_migrations`
+  row. A failure rolls the step back — including its `ALTER` — and leaves the
+  counter untouched, so a crash mid-upgrade can simply be retried.
+- A database written by a **newer** release is refused at startup instead of
+  being served by older code. `health_check.check_database()` reports the same
+  state (`schema v2/3 (current)`), and flags that case as unhealthy.
+- Downgrading is not supported: restore the `bot.db` backup you took before the
+  upgrade, or upgrade the code again.
+
+To add a migration, append one entry with the next version number and an
+`apply(connection)` that is safe on both a fresh and an old database. Never edit
+or reorder an existing entry: databases in the field have already run it.
+
+```bash
+cp bot.db bot.db.bak      # take a copy before upgrading a production instance
+```
+
 ## Deployment
 
 For a server deployment, keep `.env` and `bot.db` on the server and deploy only the application files and dependencies.

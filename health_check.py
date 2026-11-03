@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import migrations
+
 
 @dataclass(frozen=True)
 class HealthResult:
@@ -41,19 +43,20 @@ def check_process_identity(expected_script: str, cmdline_path: str = "/proc/self
 
 
 def check_database(db_path: str) -> HealthResult:
-    """Run a read-only SQLite integrity probe."""
+    """Run a read-only SQLite integrity probe and report the schema version."""
     start = time.monotonic()
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0) as conn:
             value = conn.execute("PRAGMA quick_check").fetchone()
+            schema = migrations.describe(conn)
         latency = (time.monotonic() - start) * 1000
-        ok = bool(value and value[0] == "ok")
-        return HealthResult(
-            ok,
-            "sqlite",
-            "SQLite quick_check=ok" if ok else f"SQLite quick_check={value!r}",
-            latency,
-        )
+        intact = bool(value and value[0] == "ok")
+        # A database written by a newer release cannot be served by this code;
+        # the application refuses to start, so monitoring must not call it healthy.
+        outdated = schema.endswith("(newer than this release)")
+        detail = f"SQLite quick_check={value!r}" if not intact else "SQLite quick_check=ok"
+        detail = f"{detail} | {schema}"
+        return HealthResult(intact and not outdated, "sqlite", detail, latency)
     except Exception as exc:
         latency = (time.monotonic() - start) * 1000
         return HealthResult(False, "sqlite", f"{type(exc).__name__}: {exc}", latency)

@@ -65,6 +65,7 @@ from reply_context import (
 )
 from error_handling import classify_gemini_error, classify_telegram_error, generic_user_error
 import providers
+import migrations
 from providers import ProviderError
 from settings_store import SPECS, SettingError, SettingsStore
 from admin_panel import AdminAccess, admin_callback, admin_command
@@ -782,6 +783,17 @@ with db_lock:
         """
     )
     db.commit()
+
+# One-shot schema changes (ALTER/backfill) are versioned in PRAGMA user_version,
+# so an existing bot.db upgrades in place instead of being recreated. The table
+# definitions above stay idempotent; this covers what they cannot express.
+_applied_migrations = migrations.migrate(db, db_lock)
+if _applied_migrations:
+    logger.info(
+        "Database upgraded | %s",
+        ", ".join(f"v{m.version} {m.name}" for m in _applied_migrations),
+    )
+logger.info("Database ready | %s", migrations.describe(db))
 
 # Additive reminder tables use the existing durable database, independently of
 # Aura's long-term memory subsystem.

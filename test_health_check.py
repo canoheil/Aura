@@ -49,3 +49,37 @@ def test_run_local_health_checks_returns_expected_components(tmp_path):
     sqlite3.connect(db).close()
     results = run_local_health_checks(str(db), "/proc/self/cmdline")
     assert [r.component for r in results] == ["process", "sqlite"]
+
+
+def test_database_check_reports_the_schema_version(tmp_path):
+    import migrations
+
+    db = tmp_path / "test.db"
+    with sqlite3.connect(db) as conn:
+        migrations.migrate(conn)
+    result = check_database(str(db))
+    assert result.ok is True
+    assert f"schema v{migrations.LATEST_VERSION}/{migrations.LATEST_VERSION} (current)" in result.detail
+
+
+def test_database_check_flags_a_pending_migration(tmp_path):
+    import migrations
+
+    db = tmp_path / "test.db"
+    sqlite3.connect(db).close()  # a database that never ran a migration
+    result = check_database(str(db))
+    assert "pending" in result.detail
+    # Pending is not fatal: the next start applies them.
+    assert result.ok is True
+
+
+def test_database_check_fails_a_database_from_a_newer_release(tmp_path):
+    import migrations
+
+    db = tmp_path / "test.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(f"PRAGMA user_version = {migrations.LATEST_VERSION + 1}")
+        conn.commit()
+    result = check_database(str(db))
+    assert result.ok is False
+    assert "newer than this release" in result.detail

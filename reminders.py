@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from telegram.error import BadRequest, Forbidden, RetryAfter
 
 import i18n
+import migrations
 
 logger = logging.getLogger("aura-reminders")
 DEFAULT_TIMEZONE = "Asia/Tehran"
@@ -517,11 +518,9 @@ class ReminderStore:
                 attempts INTEGER NOT NULL DEFAULT 0, delivered_at INTEGER, last_error TEXT NOT NULL DEFAULT '',
                 recipient_name TEXT NOT NULL DEFAULT ''
             )""")
-            # Existing reminders keep their IDs/statuses and get a safe generic
-            # display name; the verified Telegram user_id was already stored.
-            columns = {row["name"] for row in self.db.execute("PRAGMA table_info(reminders)").fetchall()}
-            if "recipient_name" not in columns:
-                self.db.execute("ALTER TABLE reminders ADD COLUMN recipient_name TEXT NOT NULL DEFAULT ''")
+            # Shared with the versioned migration of the same name, so an old
+            # database is fixed here too when the store is used on its own.
+            migrations.ensure_reminder_recipient_column(self.db)
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, next_attempt, due_utc)")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_reminders_owner ON reminders(user_id, chat_id, status)")
             self.db.commit()

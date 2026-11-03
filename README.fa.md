@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/brand/banner.png" alt="Aura — دستیار هوش مصنوعی برای تلگرام" width="100%">
+</p>
+
 # آورا (Aura)
 
 **دستیار هوش مصنوعی خودمیزبان برای تلگرام — دوزبانه، مستقل از فروشندهٔ مدل، و سخت‌گیر در گفتن حقیقت.**
@@ -133,8 +137,9 @@ python bot.py
 | [استقرار](docs/deployment.md) | اجرا به‌عنوان سرویس، cPanel، هم‌زمانی، بررسی سلامت، ارتقا |
 | [معماری](docs/architecture.md) | نقشهٔ ماژول‌ها، حلقهٔ عامل، لایه‌های پرامپت، اصول طراحی |
 
-مطالب مربوط به مشارکت در [CONTRIBUTING.md](CONTRIBUTING.md) و مجوزها و
-انتساب‌های شخص ثالث در [NOTICE](NOTICE) است.
+مطالب مربوط به مشارکت در [CONTRIBUTING.md](CONTRIBUTING.md)، پالت رنگ و لوگوها
+و توضیح رندر دوبارهٔ آن‌ها در [`assets/brand/`](assets/brand/README.md)، و
+مجوزها و انتساب‌های شخص ثالث در [NOTICE](NOTICE) است.
 
 ## چطور کار می‌کند
 

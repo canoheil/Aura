@@ -237,13 +237,25 @@ def test_more_spoken_time_forms(text, seconds):
     "۱.۵ ساعت دیگه یادم بنداز آب بخورم",
     "تقریباً پنج دقیقه دیگه یادم بنداز آب بخورم",
     "پنج یا ده دقیقه دیگه یادم بنداز آب بخورم",
-    "دو ساعت و سی دقیقه دیگه یادم بنداز آب بخورم",
 ])
 def test_ambiguous_durations_are_not_silently_guessed(text):
     from reminders import ambiguous_reminder_source
     with pytest.raises(ReminderError):
         parse_reminder(text, "Asia/Tehran", now=NOW, natural=True)
     assert ambiguous_reminder_source(text)
+
+
+@pytest.mark.parametrize("text,seconds", [
+    ("یک ساعت و نیم دیگه یادم بنداز آب بخورم", 90 * 60),
+    ("دو ساعت و سی دقیقه دیگه یادم بنداز آب بخورم", 150 * 60),
+    ("ساعت و نیم دیگه یادم بنداز آب بخورم", 90 * 60),
+    ("یک ساعت و ربع دیگه یادم بنداز آب بخورم", 75 * 60),
+])
+def test_a_compound_duration_is_one_time_not_two(text, seconds):
+    """«یک ساعت و نیم» is a single, exact duration; it used to be refused."""
+    spec = parse_reminder(text, "Asia/Tehran", now=NOW, natural=True)
+    assert spec.due_utc == NOW + timedelta(seconds=seconds)
+    assert spec.text == "آب بخورم"
 
 
 def test_time_quote_must_not_be_a_substring_of_another_number():

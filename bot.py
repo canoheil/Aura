@@ -90,6 +90,7 @@ from reminders import (
     explicit_reminder_time_count,
     explicit_reminder_time_phrases,
     format_due,
+    format_due_human,
     grounded_reminder_task,
     has_recurring_reminder,
     is_reminder_request,
@@ -4056,7 +4057,7 @@ def _looks_like_reminder_task_answer(text: str) -> bool:
 
 def _reminder_runtime_context(update: Update, text: str, pending: Optional[dict] = None) -> dict:
     pending_applies = bool(pending and pending.get("topic_current", True) and (
-        (pending.get("waiting") == "missing_time" and reminder_time_reply(text))
+        (pending.get("waiting") in {"missing_time", "missing_clock"} and reminder_time_reply(text))
         or (pending.get("waiting") == "missing_task" and _looks_like_reminder_task_answer(text))
     ))
     sources = ([pending["request"]] if pending_applies else []) + [text]
@@ -4077,7 +4078,7 @@ def _reminder_runtime_context(update: Update, text: str, pending: Optional[dict]
         "lang": user_language(update),
         "sources": sources,
         "explicit": bool(pending_applies or is_reminder_request(text) or broader_request),
-        "awaiting_time": bool(pending_applies and pending.get("waiting") == "missing_time"),
+        "awaiting_time": bool(pending_applies and pending.get("waiting") in {"missing_time", "missing_clock"}),
     }
 
 
@@ -4194,7 +4195,10 @@ async def _confirm_reminder(update: Update, reminder_id: int, original_text: str
     _pending_reminder_context.pop(key)
     _last_reminder_context.put(key, {"id": reminder_id})
     phrase = await _natural_reminder_phrase(row, "confirmation")
-    answer = phrase or tr("reminder.fallback.confirmation", update)
+    # The single most useful fact after scheduling is *when*. The model may add
+    # colour, but the instant is always stated by the application.
+    when = format_due_human(row["due_utc"], row["timezone"], user_language(update))
+    answer = f"{phrase}\n\n⏰ {when}" if phrase else tr("reminder.fallback.confirmation", update, when=when)
     # The row is already committed; authoritative details remain available via
     # /reminders rather than being appended to every conversational confirmation.
     await _safe_reply_text(update, answer)
@@ -4267,14 +4271,20 @@ async def _schedule_reminder(update: Update, request: str, *, natural: bool = Fa
             if result and result.get("ok") is True:
                 await _confirm_reminder(update, int(result["id"]), original_text)
                 return
-        if exc.code in {"missing_time", "missing_task", "ambiguous_time"}:
+        if exc.code in {"missing_time", "missing_clock", "missing_task", "ambiguous_time"}:
             # An ambiguous selection is not resolved by silently choosing a time;
             # ask for the complete request again. Incomplete requests can be
             # completed in the next turn by the same user in the same chat.
             waiting = exc.code
-            _pending_reminder_context.put(key, {"request": request[:12000], "waiting": waiting, "natural": natural})
+            _pending_reminder_context.put(key, {
+                "request": request[:12000], "waiting": waiting, "natural": natural,
+                # «فردا صبح» needs a clock, not a new sentence: keep the part
+                # that was understood so the reply can be slotted into it.
+                "day": str(getattr(exc, "fragment", "") or "")[:80],
+            })
             answer = tr({
                 "missing_time": "reminder.ask.time",
+                "missing_clock": "reminder.ask.clock",
                 "missing_task": "reminder.ask.task",
             }.get(waiting, "reminder.ask.complete"), update)
         else:
@@ -4463,7 +4473,17 @@ async def _maybe_reminder_followup(update: Update, text: str) -> bool:
         return False
     waiting = pending.get("waiting")
     time_reply = reminder_time_reply(text)
-    if waiting == "missing_time" and time_reply:
+    if waiting == "missing_clock" and time_reply:
+        # Slot the clock in after the day they already gave, so the task stays
+        # intact: «فردا صبح» + «۹ صبح» → «فردا صبح ساعت ۹ صبح …».
+        request = str(pending.get("request") or "")
+        day = str(pending.get("day") or "")
+        position = request.find(day) + len(day) if day and day in request else -1
+        if position > 0:
+            combined = f"{request[:position]} ساعت {time_reply} {request[position:]}"
+        else:
+            combined = f"{request} ساعت {time_reply}"
+    elif waiting == "missing_time" and time_reply:
         combined = f"{pending['request']} {time_reply}"
     elif waiting == "missing_task" and not time_reply and _looks_like_reminder_task_answer(text):
         combined = f"{pending['request']} {text}"
@@ -6331,7 +6351,8 @@ async def message_handler(
         chat = update.effective_chat
         pending = _pending_reminder_context.get((chat.id, update.effective_user.id)) if chat and is_group(update) else None
         raw = update.message.text or ""
-        if not (pending and pending.get("topic_current", True) and pending.get("waiting") == "missing_time"
+        if not (pending and pending.get("topic_current", True)
+                and pending.get("waiting") in {"missing_time", "missing_clock"}
                 and reminder_time_reply(raw) and is_group_allowed(chat.id)):
             return
 
@@ -6862,7 +6883,7 @@ async def message_handler(
                 else:
                     key = _reminder_key(update)
                     code = result.get("code")
-                    if code in {"missing_time", "missing_task"} and sticker_context["reminder"].get("explicit"):
+                    if code in {"missing_time", "missing_clock", "missing_task"} and sticker_context["reminder"].get("explicit"):
                         _pending_reminder_context.put(key, {
                             "request": text[:12000], "waiting": code, "natural": False, "model_only": True,
                         })

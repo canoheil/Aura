@@ -62,7 +62,7 @@ message, and `/deletemydata` wipes a person's data in one transaction.
 | Retrieval | Guarded You.com web search with a freshness gate, page opening, weather from Open-Meteo (keyless) |
 | Media in | Photos, image documents, stickers, voice, audio, video, video notes, documents, YouTube links |
 | Media out | Photorealistic images via Pollinations (optional), vector images rendered locally from SVG, Reddit memes (keyless) |
-| Reminders | One-shot reminders with per-user timezones, natural Persian parsing, delivery with a mention in groups |
+| Reminders | One-shot reminders with per-user timezones, Persian clock words and Solar Hijri dates, delivery with a mention in groups |
 | Groups | Whitelisted groups only, trigger words and mentions, speaker-aware replies, conservative sticker cooldowns |
 | Operations | `/admin` panel, health checks, versioned schema migrations, startup service scripts, per-user quotas |
 | Languages | Persian (default) and English, per user, with a full interface catalog |
@@ -169,7 +169,7 @@ on Gemini or on a local Ollama model.
 | `settings_store.py`, `admin_panel.py` | Runtime settings, the `/admin` panel, audit trail |
 | `aura_identity.py`, `aura_personality_boundary.py`, `persona.py` | Who Aura is, and where style is allowed to change |
 | `freshness_policy.py`, `answer_quality.py` | When a search is mandatory, and what a trustworthy answer looks like |
-| `reminders.py`, `memory_bridge.py`, `data_deletion.py` | Durable state and its lifecycle |
+| `reminder_time.py`, `reminders.py`, `memory_bridge.py`, `data_deletion.py` | Time parsing, durable state and its lifecycle |
 | `telegram_formatting.py`, `i18n.py` | Copy-safe HTML and the Persian/English catalog |
 | `sticker_manager.py`, `sticker_vision.py`, `svg_image.py`, `pollinations_image.py`, `meme_api.py`, `weather_api.py` | Optional capabilities |
 

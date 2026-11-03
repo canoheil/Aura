@@ -249,8 +249,10 @@ CATALOG: dict[str, dict[str, str]] = {
     "remind.usage": {
         "fa": (
             "زمان و متن یادآوری را بفرست؛ مثلاً:\n"
-            "/remind in 10m آب بخور\n/remind 2026-11-01 09:30 جلسه\n"
-            "تاریخ به میلادی است. منطقهٔ زمانی: /timezone"
+            "یادم بنداز فردا ساعت ۹ صبح قرص بخورم\n"
+            "یادم بنداز یک ساعت و نیم دیگه چای دم کنم\n"
+            "/remind in 10m آب بخور — /remind 2026-11-01 09:30 جلسه\n"
+            "منطقهٔ زمانی: /timezone"
         ),
         "en": (
             "Send a time and the reminder text, for example:\n"
@@ -296,6 +298,10 @@ CATALOG: dict[str, dict[str, str]] = {
     "reminder.err.missing_time": {
         "fa": "کی یادآوری کنم؟ هنوز چیزی ثبت نکردم.",
         "en": "When should I remind you? Nothing has been scheduled.",
+    },
+    "reminder.err.missing_clock": {
+        "fa": "چه ساعتی؟ مثلاً «۹ صبح» یا «۱۷:۳۰». هنوز چیزی ثبت نکردم.",
+        "en": "At what time? For example \"9 am\" or \"17:30\". Nothing has been scheduled.",
     },
     "reminder.err.missing_task": {
         "fa": "چی رو یادآوری کنم؟ هنوز چیزی ثبت نکردم.",
@@ -478,6 +484,10 @@ CATALOG: dict[str, dict[str, str]] = {
         "fa": "حتماً؛ چه زمانی یادآوری کنم؟ هنوز ثبتش نکردم.",
         "en": "Sure — when should I remind you? Nothing is scheduled yet.",
     },
+    "reminder.ask.clock": {
+        "fa": "چه ساعتی؟ مثلاً «۹ صبح» یا «۱۷:۳۰». هنوز ثبتش نکردم.",
+        "en": "At what time? For example \"9 am\" or \"17:30\". Nothing is scheduled yet.",
+    },
     "reminder.ask.task": {
         "fa": "چی رو یادآوری کنم؟ هنوز ثبتش نکردم.",
         "en": "What should I remind you about? Nothing is scheduled yet.",
@@ -486,7 +496,10 @@ CATALOG: dict[str, dict[str, str]] = {
         "fa": "زمان یا متن چندپهلو بود؛ لطفاً زمان و کار رو یک‌بار کامل و دقیق بگو. هنوز چیزی ثبت نکردم.",
         "en": "That request was ambiguous; please give the time and the task once, precisely. Nothing is scheduled yet.",
     },
-    "reminder.fallback.confirmation": {"fa": "باشه، یادت می‌ندازم.", "en": "Sure, I'll remind you."},
+    "reminder.fallback.confirmation": {
+        "fa": "باشه — {when} یادت می‌ندازم.",
+        "en": "Sure — I'll remind you {when}.",
+    },
     "reminder.fallback.nothing": {
         "fa": "هنوز یادآوری ثبت نکردم؛ زمان و کاری را که می‌خواهی بگو.",
         "en": "Nothing is scheduled yet; tell me the time and the task.",

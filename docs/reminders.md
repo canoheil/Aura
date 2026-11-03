@@ -7,9 +7,11 @@ timezone changes.
 
 ```text
 ۱۰ دقیقه دیگه یادم بنداز آب بخورم
-دو دقیقه دیگه یادم بنداز آب بخورم
-پنج دقیقع دیگه یادم بیار فلان کارو بکنم
-یادم بنداز فردا ساعت ۹:۳۰ قرص بخورم
+یک ساعت و نیم دیگه یادم بنداز چای دم کنم
+یادم بنداز فردا ساعت ۹ صبح قرص بخورم
+یادم بنداز ساعت ۹ شب به بابا زنگ بزنم
+یادم بنداز دوشنبه ۱۷:۰۰ جلسه دارم
+یادم بنداز ۲۸ آبان ساعت ۹ صبح تولد سارا
 /remind in 10m آب بخورم
 /remind 2030-11-01 09:30 جلسه
 /reminders
@@ -17,22 +19,50 @@ timezone changes.
 /timezone Europe/Berlin
 ```
 
-Explicit dates use the **Gregorian calendar** and 24-hour time. Persian written
-numbers and common informal variants (including `یه ربع`, `نیم ساعت` and
-`دقیقع`) are supported.
+The parser accepts the four ways people name a time:
+
+- **A duration** — `۱۰ دقیقه دیگه`, `نیم ساعت`, `یه ربع`, `دو ساعت و سی دقیقه`.
+  Written numbers, `دقیقع`, and compound durations joined with `و` all work.
+- **A day and a clock** — `فردا ساعت ۹`, `دوشنبه ۱۷:۰۰`, `۲۸ آبان ساعت ۹ صبح`.
+  Stated in either order: `ساعت ۹ صبح فردا` is the same request.
+- **A clock alone** — `ساعت ۹ شب`, `۱۵:۳۰`, `at 9 pm`. This means the next time
+  that clock is true, today or tomorrow, which is also what it means in speech.
+- **A calendar date** — Gregorian `2026-11-01 09:30` (24-hour, optional UTC
+  offset) or Solar Hijri `۲۸ آبان` / `۲۸ آبان ۱۴۰۶` (the current Hijri year when
+  the year is omitted).
+
+Persian clock words map to real hours rather than to labels: `۹ صبح` is 09:00,
+`۹ شب` is 21:00, `۱۲ شب` is midnight of the next day, and `۱۲ ظهر` is noon.
+Weekday names mean the next occurrence — a weekday whose time has already passed
+this week rolls forward seven days.
 
 ## When it is not sure
 
 Parsing is conservative: if the time or the task is unclear, Aura asks instead of
-claiming a reminder was created.
+claiming a reminder was created. The question is specific — a request such as
+`فردا صبح` is recognised as a day without a clock, and Aura asks *at what time*
+instead of asking for the whole request again.
 
-If only the time is missing, a short follow-up such as `دو دقیقه دیگه` completes
-the same request. These incomplete conversations:
+A short follow-up completes the same request, and the two halves are joined the
+way a person would say them:
+
+```text
+You:  یادم بنداز فردا صبح زنگ بزنم به مامان
+Aura: چه ساعتی؟ مثلاً «۹ صبح» یا «۱۷:۳۰». هنوز ثبتش نکردم.
+You:  ۹ صبح
+Aura: باشه — چهارشنبه ۱۳ آبان ۱۴۰۵، ساعت ۹:۰۰ صبح یادت می‌ندازم.
+```
+
+These incomplete conversations:
 
 - are scoped to the same user and the same chat,
 - expire after ten minutes,
 - are cleared by `/new` or a restart,
 - are *not* registered reminders.
+
+Two explicit times in one message (`فردا ۹:۰۰ و ۱۴:۰۰`), an approximate
+duration (`تقریباً پنج دقیقه`), or an alternative (`پنج یا ده دقیقه`) are refused
+rather than resolved by picking one.
 
 After a change of topic, repeat the complete request rather than relying on an
 ambiguous follow-up. A short `لغوش کن` can cancel the most recently referenced
@@ -54,10 +84,14 @@ SQLite **before** reporting success. `/reminders` is the authoritative status.
 ## Delivery
 
 After a successful commit, the model can phrase a short confirmation using
-Aura's normal personality and verified identity context. At the due time it can
-also generate a brief, task-specific reminder. Confirmations and deliveries do
-not automatically add the timestamp, timezone, ID or a second copy of the task;
-those details remain available through `/reminders`. Both are extra model calls.
+Aura's normal personality and verified identity context — but the **instant is
+always printed by the application**, in the user's own calendar and numerals
+(`چهارشنبه ۱۳ آبان ۱۴۰۵، ساعت ۹:۰۰ صبح`). A confirmation is the moment when a
+misunderstanding is still cheap to fix, so it must say when.
+
+At the due time the model can generate a brief, task-specific reminder.
+Deliveries do not automatically add the timestamp, timezone or ID; those remain
+available through `/reminders`. Both are extra model calls.
 
 A conservative wording check rejects obvious changes or omissions of task
 details; it is not a semantic guarantee. If generation fails, times out, or does

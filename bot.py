@@ -82,6 +82,7 @@ from aura_self_identity import AuraSelfIdentityBoundary
 from aura_personality_boundary import (
     AuraPersonalityBoundary, identity_answer_keeps_boundary, is_identity_override_attempt,
 )
+import persona
 from group_context import build_group_context
 from message_identity import build_message_identity_context
 from memory_bridge import MemoryBridge
@@ -893,6 +894,15 @@ def owner_name() -> str:
     return ""
 
 
+def persona_config() -> persona.PersonaConfig:
+    """The deployment's style preferences; the default leaves the prompt untouched.
+
+    Read on every turn instead of at import time so `/admin set persona_*` takes
+    effect immediately, without a restart.
+    """
+    return persona.persona_config(SETTINGS.get("persona_tone"), SETTINGS.get("persona_note"))
+
+
 def tr(key: str, update: Optional[Update] = None, **values) -> str:
     """Translate a user-facing string for the current user."""
     return _t(key, user_language(update), **values)
@@ -1146,6 +1156,13 @@ def build_system_prompt(update: Optional[Update] = None, *, chat_id: Optional[in
     prompt += "\n\n" + aura_identity.system_context(FOUNDER_USER_ID)
     prompt += "\n\n" + AuraSelfIdentityBoundary().system_context()
     prompt += "\n\n" + AuraPersonalityBoundary().system_context()
+
+    # Owner style preferences are appended after the boundaries and before any
+    # feature guidance, so they read as the lowest-priority layer of the prompt.
+    # An unconfigured deployment gets exactly the prompt it had before.
+    persona_section = persona.build_persona_section(persona_config())
+    if persona_section:
+        prompt += "\n\n" + persona_section
 
     # Sticker guidance is dynamic: it disappears automatically when the pack
     # fails to load, so the model is never told about an unavailable tool.

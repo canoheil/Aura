@@ -13,7 +13,6 @@ from pathlib import Path
 
 from sticker_manager import StickerManager, sticker_manager
 
-
 ROOT = Path(__file__).resolve().parent
 
 VALID_STICKERS = [

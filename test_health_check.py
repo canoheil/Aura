@@ -1,6 +1,4 @@
-import os
 import sqlite3
-from pathlib import Path
 
 from health_check import (
     check_database,
@@ -63,8 +61,6 @@ def test_database_check_reports_the_schema_version(tmp_path):
 
 
 def test_database_check_flags_a_pending_migration(tmp_path):
-    import migrations
-
     db = tmp_path / "test.db"
     sqlite3.connect(db).close()  # a database that never ran a migration
     result = check_database(str(db))

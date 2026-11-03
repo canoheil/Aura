@@ -1,0 +1,64 @@
+# Local checks that mirror CI, so a red build is caught before the push.
+#
+#   pip install -r requirements-dev.txt
+#   pre-commit install            # fast checks on every commit
+#   pre-commit install --hook-type pre-push   # the test suite before pushing
+#
+# Run everything once without committing:
+#   pre-commit run --all-files
+# `pre-commit install` sets up both hooks: the fast checks before a commit and
+# the test suite before a push.
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Markdown keeps hard line breaks; .env.example is a template of blank values.
+        exclude: ^(assets/|.*\.md$|\.env\.example$)
+      - id: end-of-file-fixer
+      - id: check-toml
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: forbid-submodules
+      - id: detect-private-key
+
+  # A runtime artefact, not source: bot.db holds every user's messages, .env
+  # holds the bot token, and .aura_secret_key decrypts stored provider keys.
+  # .gitignore already covers them; this also catches `git add -f`.
+  - repo: local
+    hooks:
+      - id: no-runtime-data
+        name: refuse to commit .env, bot.db or the secret key
+        language: system
+        entry: python repo_guard.py
+        pass_filenames: false
+        always_run: true
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Keep in step with the range in requirements-dev.txt.
+    rev: v0.17.3
+    hooks:
+      # Lint first; the formatter is deliberately not enabled yet. `bot.py` is a
+      # single large module, so a first `ruff format` would rewrite it wholesale
+      # and bury real changes. Enable it in its own commit when that is wanted.
+      - id: ruff-check
+        args: ["--fix", "--exit-non-zero-on-fix"]
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest (hermetic suite, ~15s)
+        entry: python -m pytest -q
+        language: system
+        types: [python]
+        # The suite imports the flat modules from the repository root, so one
+        # invocation is enough; running it per file would be both slower and wrong.
+        pass_filenames: false
+        require_serial: true
+        stages: [pre-push]

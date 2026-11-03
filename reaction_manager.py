@@ -11,13 +11,12 @@ from __future__ import annotations
 import json
 import re
 import time
-
-from retry_policy import call_with_retry
 from collections import OrderedDict
 from dataclasses import dataclass
 from threading import Lock
 from typing import Optional
 
+from retry_policy import call_with_retry
 
 REACTION_EMOJIS = frozenset({"❤️", "😂", "🔥", "👍", "🎉", "😢"})
 AI_REACTION_VALUES = ("NONE", "❤️", "😂", "🔥", "👍", "🎉", "😢")

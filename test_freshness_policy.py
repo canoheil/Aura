@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import ast
 import logging
-import os
 from pathlib import Path
 from unittest import mock
 
@@ -322,14 +321,14 @@ def _agent_namespace(*, client, registry, runner, max_rounds=3):
     globals supplied by hand.
     """
     import base64
+
     from google.genai import types
 
+    from answer_quality import has_any_web_evidence, has_web_evidence
+    from i18n import t as _t
+    from observability import RequestTrace
     from retry_policy import call_with_retry, extract_status_code
     from tool_system import AgentRunState, has_textual_tool_declaration
-    from answer_quality import has_web_evidence, has_any_web_evidence
-    from observability import RequestTrace
-
-    from i18n import t as _t
 
     _, funcs = _source_and_functions()
     ns = {

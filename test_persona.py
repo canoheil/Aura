@@ -9,14 +9,7 @@ import pytest
 import admin_panel
 import persona
 import settings_store
-import test_agent_tool_response as _harness
 from settings_store import SettingError, SettingsStore
-
-# The real bot module, loaded against an in-memory database and a fake model, is
-# the shared fixture in the harness. pytest registers fixtures by module
-# attribute name, so this re-export hands it to these tests without the import
-# and the test parameter tripping over each other.
-isolated_bot = _harness.isolated_bot
 
 
 @pytest.fixture()

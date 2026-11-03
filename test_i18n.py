@@ -7,8 +7,7 @@ import pytest
 
 import i18n
 from i18n import LanguageStore, normalize_language, resolve_language, t
-from test_agent_tool_response import isolated_bot, _telegram_update, _text_response
-
+from test_agent_tool_response import _telegram_update, _text_response
 
 # --- catalog ---------------------------------------------------------------
 

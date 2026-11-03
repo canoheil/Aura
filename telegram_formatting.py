@@ -10,7 +10,6 @@ from __future__ import annotations
 import html
 import re
 
-
 _ALLOWED_TAG_RE = re.compile(r"</?(?:b|strong|i|em|u|s|strike|del|code|pre|blockquote|tg-spoiler|tg-emoji)(?:\s+[^>]*)?>", re.I)
 _PLACEHOLDER_RE = re.compile(r"\x00(\d+)\x00")
 

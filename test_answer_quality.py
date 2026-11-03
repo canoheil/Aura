@@ -8,9 +8,7 @@ from answer_quality import (
     remove_generated_source_section,
     search_source_urls,
 )
-from test_agent_tool_response import (
-    isolated_bot, _runtime, _telegram_update, _text_response, _tool_response,
-)
+from test_agent_tool_response import _runtime, _telegram_update, _text_response, _tool_response
 
 
 def test_cleaner_preserves_code_indentation_and_numeric_arrays(isolated_bot):

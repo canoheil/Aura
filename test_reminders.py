@@ -1,8 +1,8 @@
 """Durable reminder and scheduler tests; no real Telegram connection."""
 import asyncio
-from datetime import datetime, timedelta, timezone
 import sqlite3
 import threading
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,8 +10,14 @@ import pytest
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter
 
 from reminders import (
-    DEFAULT_TIMEZONE, ReminderError, ReminderScheduler, ReminderSpec, ReminderStore,
-    format_due, is_reminder_request, parse_reminder,
+    DEFAULT_TIMEZONE,
+    ReminderError,
+    ReminderScheduler,
+    ReminderSpec,
+    ReminderStore,
+    format_due,
+    is_reminder_request,
+    parse_reminder,
 )
 
 NOW = datetime(2026, 10, 31, 0, 0, tzinfo=timezone.utc)

@@ -1,13 +1,12 @@
 import asyncio
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-import threading
 from unittest.mock import Mock
 
 from chat_update_processor import ChatUpdateProcessor
 from meme_api import MemeClient
 from weather_api import WeatherClient
-from test_agent_tool_response import isolated_bot
 
 
 def _update(chat_id):

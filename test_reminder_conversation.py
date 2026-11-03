@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from reminders import DEFAULT_TIMEZONE, ReminderSpec, parse_reminder
-from test_agent_tool_response import isolated_bot, _telegram_update, _text_response
+from test_agent_tool_response import _telegram_update, _text_response
 
 
 @pytest.mark.parametrize("text,seconds,task", [
@@ -374,6 +374,7 @@ def test_status_question_without_ephemeral_state_checks_database(isolated_bot):
 
 def test_timed_out_model_interpretation_cannot_write_later(isolated_bot, monkeypatch):
     import threading
+
     from test_agent_tool_response import _tool_response
     bot, _ = isolated_bot
     release = threading.Event()

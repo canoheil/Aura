@@ -9,8 +9,7 @@ import pytest
 import data_deletion
 import i18n
 from data_deletion import CATEGORIES, delete, plan, total
-from test_agent_tool_response import isolated_bot, _telegram_update, _text_response
-
+from test_agent_tool_response import _telegram_update
 
 PERSIAN = re.compile("[\u0600-\u06FF]")
 

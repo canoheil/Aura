@@ -7,3 +7,9 @@
 
 # Test runner. Kept as a wide-enough range so CI and local runs agree on behavior.
 pytest>=9.2.0,<10
+
+# Linter + import sorter (no formatter yet; see pyproject.toml).
+ruff>=0.17,<1
+
+# Optional: the same checks run automatically before a commit/push.
+pre-commit>=4,<5

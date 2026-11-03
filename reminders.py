@@ -8,14 +8,14 @@ message but before SQLite recorded success can result in a duplicate.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import html
 import logging
 import re
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError

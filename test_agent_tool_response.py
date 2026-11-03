@@ -2,12 +2,11 @@
 from copy import deepcopy
 from pathlib import Path
 
-from google.genai import types
 import pytest
+from google.genai import types
 
 from test_freshness_policy import _agent_namespace
 from tool_system import AgentRunner, ToolRegistry, has_textual_tool_declaration
-
 
 RAW_DECLARATION = (
     "declaration:default_api:file_analyze{focus:Identify if this character is "
@@ -355,6 +354,7 @@ def isolated_bot(monkeypatch):
     """Load the real handler with a private in-memory DB and a fake API client."""
     import importlib.util
     import sqlite3
+
     from google import genai
 
     for key, value in {

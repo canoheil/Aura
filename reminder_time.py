@@ -52,7 +52,8 @@ def _normalized(text: str) -> str:
     return str(text or "").translate(_DIGITS).replace("\u200c", " ").replace("ي", "ی").replace("ك", "ک")
 
 
-def _fa_digits(value: str) -> str:
+def fa_digits(value: str) -> str:
+    """Latin digits as Persian ones, for anything shown to a Persian reader."""
     return str(value).translate(_FA_OUT)
 
 
@@ -1052,9 +1053,9 @@ def format_due_human(timestamp: int, zone_name: str, lang: str = "fa") -> str:
         meridiem = "عصر"
     else:
         meridiem = "شب"
-    clock = _fa_digits(f"{hour % 12 or 12}:{local.minute:02d}")
+    clock = fa_digits(f"{hour % 12 or 12}:{local.minute:02d}")
     return (
-        f"{_FA_WEEKDAYS[local.weekday()]} {_fa_digits(str(jalali_day))} "
-        f"{_JALALI_MONTHS[jalali_month - 1]} {_fa_digits(str(jalali_year))}، "
+        f"{_FA_WEEKDAYS[local.weekday()]} {fa_digits(str(jalali_day))} "
+        f"{_JALALI_MONTHS[jalali_month - 1]} {fa_digits(str(jalali_year))}، "
         f"ساعت {clock} {meridiem}"
     )

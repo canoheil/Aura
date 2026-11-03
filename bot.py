@@ -87,6 +87,7 @@ from reminders import (
     ReminderSpec,
     ReminderStore,
     ambiguous_reminder_source,
+    cancel_buttons,
     explicit_reminder_time_count,
     explicit_reminder_time_phrases,
     format_due,
@@ -201,6 +202,11 @@ try:
     REMINDER_POLL_SECONDS = max(1, min(60, int(os.getenv("REMINDER_POLL_SECONDS", "3"))))
 except ValueError:
     REMINDER_POLL_SECONDS = 3
+try:
+    # How far the «۱۰ دقیقه بعد» button pushes a delivered reminder.
+    REMINDER_SNOOZE_SECONDS = max(60, min(24 * 3600, int(os.getenv("REMINDER_SNOOZE_MINUTES", "10")) * 60))
+except ValueError:
+    REMINDER_SNOOZE_SECONDS = 600
 
 # You.com Web Search settings
 YOU_API_KEY = os.getenv("YOU_API_KEY", "").strip()
@@ -4228,7 +4234,9 @@ async def _confirm_reminder(update: Update, reminder_id: int, original_text: str
     answer = f"{phrase}\n\n⏰ {when}" if phrase else tr("reminder.fallback.confirmation", update, when=when)
     # The row is already committed; authoritative details remain available via
     # /reminders rather than being appended to every conversational confirmation.
-    await _safe_reply_text(update, answer)
+    # The one control worth offering here is the undo: a time typo is cheap to
+    # fix while the reminder is still pending, and expensive once it has fired.
+    await _safe_reply_text(update, answer, reply_markup=cancel_buttons(row, user_language(update)))
     _record_reminder_exchange(update, original_text, answer)
 
 
@@ -4483,6 +4491,8 @@ async def _maybe_reminder_followup(update: Update, text: str) -> bool:
                         answer = tr("reminder.cancel.sending", update)
                     elif row and row["status"] == "sent":
                         answer = tr("reminder.cancel.sent", update)
+                    elif row and row["status"] == "done":
+                        answer = tr("reminder.cancel.done_already", update, id=reminder_id)
                     elif row and row["status"] == "cancelled":
                         answer = tr("reminder.cancel.already_cancelled", update, id=reminder_id)
                     else:
@@ -4507,9 +4517,12 @@ async def _maybe_reminder_followup(update: Update, text: str) -> bool:
                           else tr("reminders.status.sending", update) if row["status"] == "sending"
                           else tr("reminders.status.active", update))
                 answer = tr("reminder.status.confirmed", update, id=row["id"], status=status,
-                            text=row["text"], due=format_due(row["due_utc"], row["timezone"]))
+                            text=row["text"],
+                            due=format_due_human(row["due_utc"], row["timezone"], user_language(update)))
             elif row["status"] == "sent":
                 answer = tr("reminder.status.already_sent", update, id=row["id"])
+            elif row["status"] == "done":
+                answer = tr("reminder.status.done", update, id=row["id"])
             elif row["status"] == "failed":
                 answer = tr("reminder.status.failed", update, id=row["id"])
             else:
@@ -4581,7 +4594,7 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not rows:
         await _safe_reply_text(update, tr("reminders.none", update))
         return
-    header = tr("reminders.header", update)
+    header = tr("reminders.header", update, zone=reminder_store.get_timezone(update.effective_user.id))
     chunk = header
     for row in rows:
         if row["status"] == "failed":
@@ -4592,7 +4605,8 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             status = tr("reminders.status.retry", update)
         else:
             status = tr("reminders.status.active", update)
-        item = f"\n\n#{row['id']} — {format_due(row['due_utc'], row['timezone'])}\n{row['text']}\n{status}"
+        when = format_due_human(row["due_utc"], row["timezone"], user_language(update))
+        item = f"\n\n#{row['id']} — {when}\n{row['text']}\n{status}"
         # Send stored reminder text literally, and split only between reminders.
         if len((chunk + item).encode("utf-16-le")) // 2 > 3500:
             await _safe_reply_text(update, chunk)
@@ -4617,6 +4631,90 @@ async def cancel_reminder_command(update: Update, context: ContextTypes.DEFAULT_
         await _safe_reply_text(update, tr("cancelreminder.cancelled", update, id=reminder_id))
     else:
         await _safe_reply_text(update, tr("cancelreminder.not_found", update))
+
+
+async def _answer_callback(query, text: str = "", *, alert: bool = False) -> None:
+    """A tap that fails to answer spins in the client, so this never raises."""
+    try:
+        await query.answer(text or None, show_alert=alert)
+    except TelegramError as exc:
+        logger.info("Could not answer a reminder callback | %s", exc)
+
+
+async def _close_reminder_message(query, note: str) -> None:
+    """Append the outcome and drop the buttons, so the decision cannot repeat.
+
+    Editing is best-effort: a message older than two days, or one already
+    edited from another device, fails here and the toast still tells the truth.
+    """
+    try:
+        base = (query.message.text or "").rstrip()
+        await query.edit_message_text(f"{base}\n\n{note}" if base else note, reply_markup=None)
+    except TelegramError as exc:
+        logger.info("Could not edit a reminder message | %s", exc)
+
+
+async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The buttons on a reminder: undo it, push it back, or close it.
+
+    Identity comes from the update, never from the callback data: a button is
+    only a row id and an action, and `get_owned` scopes both to the person who
+    pressed it and the chat the message is in.
+    """
+    query = update.callback_query
+    if query is None or query.message is None or query.from_user is None:
+        return
+    parts = str(query.data or "").split(":")
+    if len(parts) != 3 or parts[0] != "rm" or not parts[2].isdigit():
+        await _answer_callback(query)
+        return
+    action, reminder_id = parts[1], int(parts[2])
+    lang = user_language(update)
+    row = reminder_store.get_owned(query.message.chat_id, int(query.from_user.id), reminder_id)
+    # A tap is a conversation about this reminder: «ثبت شده؟» or «لغوش کن» in
+    # the next message should refer to it, exactly as after a typed command.
+    if row:
+        _last_reminder_context.put((row["chat_id"], row["user_id"]), {"id": reminder_id})
+    if not row:
+        # Someone else's reminder, a deleted one, or a stale button on a message
+        # that was already decided. All three earn the same plain answer.
+        await _answer_callback(query, _t("reminder.callback.not_yours", lang), alert=True)
+        return
+    try:
+        if action == "done":
+            if reminder_store.finish(row["chat_id"], row["user_id"], reminder_id):
+                await _answer_callback(query, _t("reminder.callback.done", lang))
+                await _close_reminder_message(query, _t("reminder.delivery.done_mark", lang))
+            else:
+                await _answer_callback(query, _t("reminder.callback.gone", lang))
+            return
+        if action == "snooze":
+            due = reminder_store.snooze(
+                row["chat_id"], row["user_id"], reminder_id, seconds=REMINDER_SNOOZE_SECONDS,
+            )
+            if due is None:
+                await _answer_callback(query, _t("reminder.callback.gone", lang))
+                return
+            when = format_due_human(due, row["timezone"], lang)
+            await _answer_callback(query, _t("reminder.callback.snoozed", lang, when=when))
+            await _close_reminder_message(query, _t("reminder.delivery.snoozed_mark", lang, when=when))
+            return
+        if action == "cancel":
+            if reminder_store.cancel(row["chat_id"], row["user_id"], reminder_id):
+                await _answer_callback(query, _t("reminder.callback.cancelled", lang))
+                await _close_reminder_message(query, _t("reminder.delivery.cancelled_mark", lang))
+            elif row["status"] == "sent":
+                # It already fired; the button on the old confirmation is only
+                # a courtesy, and pretending otherwise would be a lie.
+                await _answer_callback(query, _t("reminder.cancel.sent", lang, id=reminder_id), alert=True)
+            else:
+                await _answer_callback(query, _t("reminder.callback.gone", lang))
+            return
+    except Exception:
+        logger.exception("Reminder callback failed | action=%s | id=%s", action, reminder_id)
+        await _answer_callback(query, _t("reminder.callback.failed", lang), alert=True)
+        return
+    await _answer_callback(query)
 
 
 async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5948,12 +6046,12 @@ def _create_background_task(coro, *, name: str) -> asyncio.Task:
     return task
 
 
-async def _safe_reply_text(update: Update, text: str) -> bool:
+async def _safe_reply_text(update: Update, text: str, **kwargs) -> bool:
     """Reply without allowing a secondary Telegram failure to mask the original error."""
     if not update.message:
         return False
     try:
-        await update.message.reply_text(text)
+        await update.message.reply_text(text, **kwargs)
         return True
     except TelegramError as exc:
         logger.warning("Could not send user-facing error message | %s", exc)
@@ -7140,6 +7238,7 @@ async def application_post_init(application: Application) -> None:
         return
     scheduler = ReminderScheduler(
         reminder_store, application.bot, poll_seconds=REMINDER_POLL_SECONDS,
+        snooze_seconds=REMINDER_SNOOZE_SECONDS,
         can_send=lambda chat_id: chat_id > 0 or is_group_allowed(chat_id),
         compose_message=lambda row: _natural_reminder_phrase(row, "delivery"),
         language=lambda row: user_language(user_id=row["user_id"]),
@@ -7217,6 +7316,11 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("remind", remind_command))
     application.add_handler(CommandHandler("reminders", reminders_command))
     application.add_handler(CommandHandler("cancelreminder", cancel_reminder_command))
+    # Registered before the admin panel: both patterns are anchored, and this
+    # one only ever sees its own `rm:` data.
+    application.add_handler(
+        CallbackQueryHandler(reminder_callback, pattern=r"^rm:")
+    )
     application.add_handler(CommandHandler("timezone", timezone_command))
     application.add_handler(CommandHandler("language", language_command))
     application.add_handler(CommandHandler("deletemydata", deletemydata_command))

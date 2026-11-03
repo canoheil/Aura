@@ -108,6 +108,38 @@ reminder can be traced to the words that caused it.
   them.
 - At most 100 pending reminders are allowed per user.
 
+## After it fires
+
+The delivery message carries the two decisions that are actually available in
+that moment:
+
+```text
+⏰ یادت نره: قرص بخورم
+[ ⏰ ۱۰ دقیقه بعد ]  [ ✅ انجام شد ]
+```
+
+- **⏰ ۱۰ دقیقه بعد** requeues the same reminder — same text, same row — for ten
+  minutes later. The label carries the actual delay, so raising
+  `REMINDER_SNOOZE_MINUTES` changes both. It can be pressed repeatedly, and is
+  the honest answer to "not now, but soon".
+- **✅ انجام شد** closes it. A finished reminder cannot be delivered again and
+  drops out of `/reminders`.
+
+The confirmation, while the reminder is still pending, carries the third useful
+decision instead — **✖️ لغو این یادآور** — because a typo is cheap to fix until
+the thing actually fires.
+
+A button only ever names a row and an action (`rm:done:12`); the person and the
+chat come from the Telegram update, and the row is looked up scoped to both. In a
+group that means the reminder's owner can press it and nobody else can: anyone
+else gets a private "that reminder isn't yours" and nothing changes. Pressing a
+button also makes that reminder the subject of the next message, so a follow-up
+«ثبت شده؟» or «لغوش کن» refers to it.
+
+After a press, the outcome is appended to the message and the keyboard is
+removed, so the same decision cannot be made twice. Edits fail after two days;
+when that happens the action still counts and the toast still reports it.
+
 ## Delivery
 
 After a successful commit, the model can phrase a short confirmation using
@@ -148,3 +180,4 @@ cancellation cannot recall a send already in progress.
 | --- | --- | --- |
 | `REMINDER_DEFAULT_TIMEZONE` | `Asia/Tehran` | Timezone for users who never chose one |
 | `REMINDER_POLL_SECONDS` | `3` | How often the worker checks for due reminders |
+| `REMINDER_SNOOZE_MINUTES` | `10` | How far the snooze button pushes a delivered reminder |

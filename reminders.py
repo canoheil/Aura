@@ -22,6 +22,7 @@ from datetime import timedelta
 from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, Forbidden, RetryAfter
 
 import i18n
@@ -180,6 +181,36 @@ class ReminderStore:
             self.db.commit()
             return cur.rowcount == 1
 
+    def finish(self, chat_id: int, user_id: int, reminder_id: int) -> bool:
+        """Acknowledge a delivered reminder: terminal, and never sent again."""
+        with self.lock:
+            cur = self.db.execute(
+                """UPDATE reminders SET status='done', claim_token=NULL, lease_until=0
+                   WHERE id=? AND chat_id=? AND user_id=? AND status='sent'""",
+                (reminder_id, chat_id, user_id),
+            )
+            self.db.commit()
+            return cur.rowcount == 1
+
+    def snooze(self, chat_id: int, user_id: int, reminder_id: int, *, seconds: int) -> Optional[int]:
+        """Requeue a delivered reminder. Returns the new due instant, or None.
+
+        Only a reminder that was actually delivered can be pushed back: it is
+        a decision about a message the person is looking at, not a way to edit
+        a schedule that has not fired yet.
+        """
+        delay = max(60, min(int(seconds), 7 * 86400))
+        due = int(self.clock()) + delay
+        with self.lock:
+            cur = self.db.execute(
+                """UPDATE reminders SET status='pending', due_utc=?, next_attempt=?, attempts=0,
+                   delivered_at=NULL, claim_token=NULL, lease_until=0, last_error=''
+                   WHERE id=? AND chat_id=? AND user_id=? AND status='sent'""",
+                (due, due, reminder_id, chat_id, user_id),
+            )
+            self.db.commit()
+            return due if cur.rowcount == 1 else None
+
     def recover_inflight(self) -> int:
         """Requeue interrupted sends on startup (one polling instance only)."""
         now = int(self.clock())
@@ -236,13 +267,47 @@ class ReminderStore:
             return cur.rowcount == 1
 
 
+# --- the two decisions a delivered reminder invites -------------------------
+# Callback data is `rm:<action>:<id>`: short (Telegram caps it at 64 bytes),
+# and it names an action and a row, never a target — the caller's own IDs come
+# from the update, so a crafted button cannot act on someone else's reminder.
+
+def reminder_buttons(row: dict, lang: Optional[str] = None, *, snooze_minutes: int = 10) -> InlineKeyboardMarkup:
+    """The two decisions a delivered reminder invites: later, or done.
+
+    The label carries the actual delay, so a deployment that changed
+    `REMINDER_SNOOZE_MINUTES` cannot promise ten minutes and deliver thirty.
+    """
+    from reminder_time import fa_digits
+
+    reminder_id = int(row["id"])
+    minutes = str(max(1, int(snooze_minutes)))
+    if not str(lang or "").lower().startswith("en"):
+        minutes = fa_digits(minutes)
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(i18n.t("reminder.button.snooze", lang, minutes=minutes),
+                             callback_data=f"rm:snooze:{reminder_id}"),
+        InlineKeyboardButton(i18n.t("reminder.button.done", lang), callback_data=f"rm:done:{reminder_id}"),
+    ]])
+
+
+def cancel_buttons(row: dict, lang: Optional[str] = None) -> InlineKeyboardMarkup:
+    """The one decision offered while a reminder is still pending."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(i18n.t("reminder.button.cancel", lang), callback_data=f"rm:cancel:{int(row['id'])}"),
+    ]])
+
+
 class ReminderScheduler:
     def __init__(self, store: ReminderStore, bot, *, poll_seconds: float = 3.0,
                  can_send: Optional[Callable[[int], bool]] = None,
                  compose_message: Optional[Callable[[dict], Awaitable[str]]] = None,
-                 language: Optional[Callable[[dict], str]] = None):
+                 language: Optional[Callable[[dict], str]] = None,
+                 snooze_seconds: int = 600):
         self.store, self.bot = store, bot
         self.poll_seconds = max(1.0, min(60.0, float(poll_seconds)))
+        # Only the label uses this; the button itself is handled in bot.py.
+        self.snooze_minutes = max(1, min(1440, int(snooze_seconds) // 60))
         self.can_send = can_send
         self.compose_message = compose_message
         # Delivery runs without an Update; the deployment supplies the recipient's
@@ -297,15 +362,20 @@ class ReminderScheduler:
                 try:
                     await self.bot.send_message(
                         chat_id=row["chat_id"], text=f"{mention}، {html.escape(message)}", parse_mode="HTML",
+                        reply_markup=reminder_buttons(row, lang, snooze_minutes=self.snooze_minutes),
                     )
                 except BadRequest:
                     # If Telegram rejects the text-mention entity, still try to
                     # deliver the reminder literally. An invalid/inaccessible
                     # chat will fail again and be recorded as permanently failed.
                     logger.warning("Reminder mention rejected; trying plain text | id=%s", row["id"])
-                    await self.bot.send_message(chat_id=row["chat_id"], text=f"{raw_name}، {message}")
+                    await self.bot.send_message(
+                        chat_id=row["chat_id"], text=f"{raw_name}، {message}",
+                        reply_markup=reminder_buttons(row, lang, snooze_minutes=self.snooze_minutes),
+                    )
             else:
-                await self.bot.send_message(chat_id=row["chat_id"], text=message)
+                await self.bot.send_message(chat_id=row["chat_id"], text=message,
+                                            reply_markup=reminder_buttons(row, lang, snooze_minutes=self.snooze_minutes))
         except asyncio.CancelledError:
             self.store.retry(row, delay=0, error="interrupted")
             raise

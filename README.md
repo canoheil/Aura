@@ -62,7 +62,7 @@ message, and `/deletemydata` wipes a person's data in one transaction.
 | Retrieval | Guarded You.com web search with a freshness gate, page opening, weather from Open-Meteo (keyless) |
 | Media in | Photos, image documents, stickers, voice, audio, video, video notes, documents, YouTube links |
 | Media out | Photorealistic images via Pollinations (optional), vector images rendered locally from SVG, Reddit memes (keyless) |
-| Reminders | One-shot reminders with per-user timezones, Persian clock words and Solar Hijri dates, delivery with a mention in groups |
+| Reminders | One-shot reminders with per-user timezones, Persian clock words and Solar Hijri dates, snooze/done buttons, mention delivery in groups |
 | Groups | Whitelisted groups only, trigger words and mentions, speaker-aware replies, conservative sticker cooldowns |
 | Operations | `/admin` panel, health checks, versioned schema migrations, startup service scripts, per-user quotas |
 | Languages | Persian (default) and English, per user, with a full interface catalog |

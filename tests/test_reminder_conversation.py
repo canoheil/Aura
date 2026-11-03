@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from test_agent_tool_response import _telegram_update, _text_response
 
-from reminders import DEFAULT_TIMEZONE, ReminderSpec, parse_reminder
+from reminders import DEFAULT_TIMEZONE, ReminderSpec, format_due, parse_reminder
 
 
 @pytest.mark.parametrize("text,seconds,task", [
@@ -36,7 +36,35 @@ def test_missing_time_followup_actually_creates_the_reminder(isolated_bot):
     asyncio.run(bot.message_handler(second, context))
     rows = bot.reminder_store.list_active(123, 123)
     assert len(rows) == 1 and rows[0]["text"] == "آب بخورم"
-    assert second.message.reply_text.await_args.args[0] == "حتماً، دو دقیقه دیگه آب خوردن رو یادت میارم 💧"
+    reply_text = second.message.reply_text.await_args.args[0]
+    assert reply_text.startswith("حتماً، دو دقیقه دیگه آب خوردن رو یادت میارم 💧")
+    assert "⏰" in reply_text
+
+
+def test_a_day_without_a_clock_is_completed_by_the_clock_alone(isolated_bot):
+    """«فردا صبح» is a real request; only the hour is missing."""
+    bot, client = isolated_bot
+    client.models.responses = [_text_response("باشه، فردا صبح یادت می‌ندازم.")]
+    first = _send(bot, "یادم بنداز فردا صبح زنگ بزنم به مامان")
+    assert "چه ساعتی" in first.message.reply_text.await_args.args[0]
+    assert not bot.reminder_store.list_active(123, 123)
+
+    _send(bot, "۹ صبح")
+    rows = bot.reminder_store.list_active(123, 123)
+    assert len(rows) == 1
+    assert rows[0]["text"] == "زنگ بزنم به مامان"
+    # Tomorrow at 09:00, and the task did not keep the half-stated time.
+    assert format_due(rows[0]["due_utc"], DEFAULT_TIMEZONE).endswith("09:00:00 (Asia/Tehran)")
+
+
+def test_a_weekday_request_can_be_completed_with_an_afternoon_clock(isolated_bot):
+    bot, client = isolated_bot
+    client.models.responses = [_text_response("باشه، دوشنبه یادت می‌ندازم.")]
+    _send(bot, "یادم بنداز دوشنبه جلسه دارم")
+    _send(bot, "۵ عصر")
+    rows = bot.reminder_store.list_active(123, 123)
+    assert len(rows) == 1 and rows[0]["text"] == "جلسه دارم"
+    assert format_due(rows[0]["due_utc"], DEFAULT_TIMEZONE).endswith("17:00:00 (Asia/Tehran)")
 
 
 def test_due_message_uses_ai_and_tags_original_group_member(isolated_bot):
@@ -103,7 +131,9 @@ def test_task_followup_and_greetings_do_not_create_unintended_reminders(isolated
     reply = _send(bot, "دارو بخورم")
     rows = bot.reminder_store.list_active(123, 123)
     assert len(rows) == 1 and rows[0]["text"] == "دارو بخورم"
-    assert reply.message.reply_text.await_args.args[0] == "باشه، یادت میارم داروت رو بخوری."
+    reply_text = reply.message.reply_text.await_args.args[0]
+    assert reply_text.startswith("باشه، یادت میارم داروت رو بخوری.")
+    assert "⏰" in reply_text
 
 
 def test_followup_is_scoped_to_same_user_and_chat(isolated_bot):
@@ -201,7 +231,8 @@ def test_model_outage_after_commit_uses_honest_confirmation_and_due_fallback(iso
     client.models.responses = [RuntimeError("Gemini down"), RuntimeError("Gemini still down")]
     update = _send(bot, "دو دقیقه دیگه یادم بنداز آب بخورم")
     row = bot.reminder_store.list_active(123, 123)[0]
-    assert update.message.reply_text.await_args.args[0] == "باشه، یادت می‌ندازم."
+    fallback = update.message.reply_text.await_args.args[0]
+    assert fallback.startswith("باشه — ") and fallback.endswith("یادت می‌ندازم.")
     bot.reminder_store.clock = lambda: row["due_utc"] + 1
     fake_tg = SimpleNamespace(send_message=AsyncMock())
     worker = bot.ReminderScheduler(bot.reminder_store, fake_tg, compose_message=lambda r: bot._natural_reminder_phrase(r, "delivery"))
@@ -231,7 +262,9 @@ def test_general_agent_has_a_real_grounded_reminder_tool(isolated_bot):
     rows = bot.reminder_store.list_active(123, 123)
     assert len(rows) == 1 and rows[0]["text"] == "قرص بخورم"
     assert not bot.reminder_store.list_active(999, 123)
-    assert update.message.reply_text.await_args.args[0] == "حتماً، خوردن قرص رو یادت میارم."
+    reply_text = update.message.reply_text.await_args.args[0]
+    assert reply_text.startswith("حتماً، خوردن قرص رو یادت میارم.")
+    assert "⏰" in reply_text
     tool_names = {d.name for t in client.models.requests[0][2].tools for d in t.function_declarations}
     assert "schedule_reminder" in tool_names
 
@@ -249,7 +282,8 @@ def test_model_can_distinguish_scheduling_time_from_duration_in_task(isolated_bo
     rows = bot.reminder_store.list_active(123, 123)
     assert len(rows) == 1 and rows[0]["text"] == "دو ساعت ورزش کنم"
     assert rows[0]["due_utc"] == clock[0] + 300
-    assert update.message.reply_text.await_args.args[0] == "باشه، یادت می‌ندازم."
+    fallback = update.message.reply_text.await_args.args[0]
+    assert fallback.startswith("باشه — ") and fallback.endswith("یادت می‌ندازم.")
     cfg = client.models.requests[0][2]
     assert cfg.tool_config.function_calling_config.allowed_function_names == ["schedule_reminder"]
 
@@ -346,7 +380,9 @@ def test_confirmation_comes_after_the_commit(isolated_bot, monkeypatch):
         return _text_response("چشم، آب خوردن رو یادت میارم.")
     monkeypatch.setattr(client.models, "generate_content", generate_content)
     response = _send(bot, "دو دقیقه دیگه یادم بنداز آب بخورم")
-    assert response.message.reply_text.await_args.args[0] == "چشم، آب خوردن رو یادت میارم."
+    reply_text = response.message.reply_text.await_args.args[0]
+    assert reply_text.startswith("چشم، آب خوردن رو یادت میارم.")
+    assert "⏰" in reply_text
 
 
 @pytest.mark.parametrize("text", [
@@ -434,7 +470,7 @@ def test_contradictory_model_wording_is_not_used_for_committed_confirmation(isol
     reply = _send(bot, "دو دقیقه دیگه یادم بنداز آب بخورم")
     text = reply.message.reply_text.await_args.args[0]
     assert "ثبت نشده" not in text
-    assert text == "باشه، یادت می‌ندازم."
+    assert text.startswith("باشه — ") and text.endswith("یادت می‌ندازم.")
     assert len(bot.reminder_store.list_active(123, 123)) == 1
 
 
@@ -461,7 +497,9 @@ def test_model_tool_followup_missing_time_is_grounded_and_persisted(isolated_bot
     reply = _send(bot, "دو دقیقه")
     rows = bot.reminder_store.list_active(123, 123)
     assert len(rows) == 1 and rows[0]["text"] == "آب بخورم"
-    assert reply.message.reply_text.await_args.args[0] == "حتماً، آب خوردن رو یادت میارم."
+    reply_text = reply.message.reply_text.await_args.args[0]
+    assert reply_text.startswith("حتماً، آب خوردن رو یادت میارم.")
+    assert "⏰" in reply_text
 
 
 def test_gemini_failure_and_transient_telegram_failure_do_not_lose_delivery(isolated_bot):
@@ -532,7 +570,7 @@ def test_confirmation_rejects_a_hallucinated_different_time(isolated_bot):
     reply = _send(bot, "دو دقیقه دیگه یادم بنداز آب بخورم")
     text = reply.message.reply_text.await_args.args[0]
     assert "ده دقیقه" not in text
-    assert text == "باشه، یادت می‌ندازم."
+    assert text.startswith("باشه — ") and text.endswith("یادت می‌ندازم.")
     assert bot.reminder_store.list_active(123, 123)[0]["text"] == "آب بخورم"
 
 

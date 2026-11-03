@@ -87,7 +87,9 @@ def test_natural_confirmation_uses_aura_persona_without_dumping_metadata(isolate
     phrase = "باشه، دو دقیقه دیگه یادت میارم."
     client.models.responses = [_text_response(phrase)]
     update, context = _update("دو دقیقه دیگه یادم بنداز آب بخورم")
-    assert _handle(bot, update, context) == phrase
+    answer = _handle(bot, update, context)
+    assert answer.startswith(phrase)
+    assert "⏰" in answer
     rows = bot.reminder_store.list_active(123, 123)
     assert len(rows) == 1 and rows[0]["text"] == "آب بخورم"
     assert 119 <= rows[0]["due_utc"] - rows[0]["created_at"] <= 120
@@ -219,7 +221,7 @@ def test_bad_confirmation_wording_falls_back_after_real_commit(isolated_bot, phr
     bot, client = isolated_bot
     client.models.responses = [_text_response(phrase)]
     answer = _handle(bot, *_update("دو دقیقه دیگه یادم بنداز آب بخورم"))
-    assert answer == "باشه، یادت می‌ندازم."
+    assert answer.startswith("باشه — ") and answer.endswith("یادت می‌ندازم.")
     rows = bot.reminder_store.list_active(123, 123)
     assert len(rows) == 1 and rows[0]["text"] == "آب بخورم"
     assert 119 <= rows[0]["due_utc"] - rows[0]["created_at"] <= 120
@@ -355,7 +357,9 @@ def test_going_out_reminder_is_one_natural_sentence_not_a_raw_transcript(isolate
     confirmation = "باشه، دو دقیقه دیگه یادت میارم."
     delivery = "یادت نرفته که می‌خواستی بری بیرون؟"
     client.models.responses = [_text_response(confirmation), _text_response(delivery)]
-    assert _handle(bot, *_update("دو دقیقه دیگه یادم بنداز برم بیرون")) == confirmation
+    answer = _handle(bot, *_update("دو دقیقه دیگه یادم بنداز برم بیرون"))
+    assert answer.startswith(confirmation)
+    assert "⏰" in answer
     row = bot.reminder_store.list_active(123, 123)[0]
     assert row["text"] == "برم بیرون"
     assert 119 <= row["due_utc"] - row["created_at"] <= 120

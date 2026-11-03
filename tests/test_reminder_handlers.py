@@ -19,7 +19,9 @@ def test_natural_request_is_persisted_without_model_guessing(isolated_bot):
     assert len(rows) == 1
     assert rows[0]["text"] == "آب بخورم"
     assert rows[0]["timezone"] == "Asia/Tehran"
-    assert update.message.reply_text.await_args.args[0] == "حتماً، آب خوردن رو یادت میارم 💧"
+    reply_text = update.message.reply_text.await_args.args[0]
+    assert reply_text.startswith("حتماً، آب خوردن رو یادت میارم 💧")
+    assert "⏰" in reply_text
     # The model only phrases the confirmation, after the actual row exists.
     assert len(client.models.requests) == 1
     assert '"phase": "confirmation"' in client.models.requests[0][1][0].parts[0].text
@@ -49,7 +51,8 @@ def test_timezone_command_schedule_list_and_cancel(isolated_bot):
     rows = bot.reminder_store.list_active(123, 123)
     assert len(rows) == 1 and rows[0]["timezone"] == "Europe/Berlin"
     rid = rows[0]["id"]
-    assert update.message.reply_text.await_args.args[0] == "باشه، یادت می‌ندازم."
+    fallback = update.message.reply_text.await_args.args[0]
+    assert fallback.startswith("باشه — ") and fallback.endswith("یادت می‌ندازم.")
 
     update, context, _ = _telegram_update()
     context.args = []

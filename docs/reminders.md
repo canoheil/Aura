@@ -75,6 +75,33 @@ Aura also has a real reminder tool for less formulaic requests. It must quote th
 user's own task and time, and the application validates them and commits to
 SQLite **before** reporting success. `/reminders` is the authoritative status.
 
+### When the grammar cannot read the time
+
+Some phrasings are outside the parser: `سه هفته دیگه`, `نیمهٔ ماه`, a regional
+expression. For a message that names time but that the grammar cannot resolve,
+Aura asks a model for a reading — and then checks it, because a model's
+confidence is not evidence:
+
+1. The quoted time must be a **verbatim fragment** of the user's own message.
+2. The application tries its own grammar on that quote first. If it succeeds,
+   **the quote wins** and the model's arithmetic is discarded.
+3. Only for a quote the grammar cannot read does the model's `local_datetime`
+   matter — and then every reading inside the quote must corroborate it: a
+   written hour, a spoken hour, صبح/عصر/شب, spoken minutes, a weekday, a Hijri
+   or Gregorian date, or a quantity with a period.
+4. A quote with **nothing checkable** in it is refused. `هفته دیگه` has no
+   anchor, so it can be neither confirmed nor denied; Aura explains that the
+   time is too vague to pin down instead of choosing a day on the user's behalf.
+5. The instant must still be in the future, inside the five-year bound, and a
+   valid local time in the user's zone.
+
+A rejected proposal produces a question, never a reminder. If the model is
+unreachable or slow, the parser's answer stands, which is the same behaviour as
+before this feature existed.
+
+Every accepted proposal is logged with the phrase it came from, so a surprising
+reminder can be traced to the words that caused it.
+
 - Repeating schedules are not supported.
 - Nonexistent or repeated local times at daylight-saving transitions are
   rejected; an explicit UTC offset, e.g. `2030-10-27 02:30+02:00`, disambiguates

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/brand/banner.png" alt="Aura — a self-hosted AI assistant for Telegram" width="100%">
+</p>
+
 # Aura
 
 **A self-hosted AI assistant for Telegram — bilingual, provider-agnostic, and careful about the truth.**
@@ -134,8 +138,10 @@ Commands are not the only interface: ordinary sentences work too. „۱۰ دقی
 | [Deployment](docs/deployment.md) | Running as a service, cPanel, concurrency, health checks, upgrades |
 | [Architecture](docs/architecture.md) | Module map, agent loop, prompt layers, design principles |
 
-Contributor-facing material lives in [CONTRIBUTING.md](CONTRIBUTING.md);
-licensing and third-party attribution in [NOTICE](NOTICE).
+Contributor-facing material lives in [CONTRIBUTING.md](CONTRIBUTING.md); the
+palette, the logos and the notes for re-rendering them in
+[`assets/brand/`](assets/brand/README.md); licensing and third-party attribution
+in [NOTICE](NOTICE).
 
 ## How it works
 

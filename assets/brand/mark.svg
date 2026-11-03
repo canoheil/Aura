@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Aura">
+  <title>Aura mark</title>
+  <desc>A crystal sparkle inside an open halo</desc>
+  <defs>
+    <linearGradient id="aura-ray" x1="0.22" y1="0.02" x2="0.78" y2="0.98">
+      <stop offset="0" stop-color="#F6F2FF"/>
+      <stop offset="0.24" stop-color="#DED3FF"/>
+      <stop offset="0.56" stop-color="#9B87F2"/>
+      <stop offset="0.82" stop-color="#68A6F6"/>
+      <stop offset="1" stop-color="#3FC9F4"/>
+    </linearGradient>
+    <linearGradient id="aura-halo" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#D3C9FF" stop-opacity="0.9"/>
+      <stop offset="0.55" stop-color="#9B87F2" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#3FC9F4" stop-opacity="0.34"/>
+    </linearGradient>
+  </defs>
+
+  <!-- the halo that circles her in the portrait, left open so it can breathe -->
+  <circle cx="256" cy="256" r="180" fill="none" stroke="url(#aura-halo)" stroke-width="9"
+          stroke-linecap="round" stroke-dasharray="961 170" stroke-dashoffset="200"
+          transform="rotate(-62 256 256)"/>
+
+  <!-- the crystal sparkle: lavender at the top, ice at the tip -->
+  <g transform="translate(256 256) scale(0.88) translate(-256 -256)">
+    <path d="M 256 44 Q 293 219 420 256 Q 293 293 256 468 Q 219 293 92 256 Q 219 219 256 44 Z"
+          fill="url(#aura-ray)"/>
+    <path d="M 256 76 Q 260 150 264 186 Q 256 196 248 186 Q 252 150 256 76 Z"
+          fill="#FFFFFF" opacity="0.7"/>
+  </g>
+
+  <!-- companion stars, borrowed from the sticker pack -->
+  <path d="M 396 122 C 397 144 398 147 420 148 C 398 149 397 152 396 174 C 395 152 394 149 372 148 C 394 147 395 144 396 122 Z"
+        fill="#FFFFFF" opacity="0.85"/>
+  <path d="M 118 352 C 119 366 120 368 134 369 C 120 370 119 372 118 386 C 117 372 116 370 102 369 C 116 368 117 366 118 352 Z"
+        fill="#7FE9FF" opacity="0.55"/>
+</svg>

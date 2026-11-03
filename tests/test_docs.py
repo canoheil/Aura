@@ -6,6 +6,7 @@ version that was forgotten. These tests keep the documentation honest without
 anyone having to remember to check it.
 """
 import re
+import struct
 from pathlib import Path
 
 import pytest
@@ -19,18 +20,23 @@ DOCUMENTS = [ROOT / "README.md", ROOT / "README.fa.md", ROOT / "CONTRIBUTING.md"
 DOCUMENTS += sorted((ROOT / "docs").glob("*.md"))
 
 LINK = re.compile(r"\]\(([^)\s]+)\)")
+IMAGE_TAG = re.compile(r"<img[^>]*\ssrc=\"([^\"]+)\"", re.IGNORECASE)
+
+
+def _targets(text: str):
+    """Every local file a document points at, from Markdown and from HTML."""
+    candidates = LINK.findall(text) + IMAGE_TAG.findall(text)
+    for target in candidates:
+        if target.startswith(("http://", "https://", "mailto:", "#", "data:")):
+            continue
+        path = target.split("#", 1)[0]
+        if path:  # a pure in-page anchor has nothing to resolve
+            yield target, path
 
 
 def _relative_links(document: Path):
-    """Links that should point at a file in this repository."""
-    text = document.read_text(encoding="utf-8")
-    for target in LINK.findall(text):
-        if target.startswith(("http://", "https://", "mailto:", "#")):
-            continue
-        path = target.split("#", 1)[0]
-        if not path:  # a pure in-page anchor
-            continue
-        yield target, path
+    """Links and images that should point at a file in this repository."""
+    yield from _targets(document.read_text(encoding="utf-8"))
 
 
 def test_every_document_exists():
@@ -78,6 +84,45 @@ def test_the_environment_template_is_not_a_stub():
     template = (ROOT / ".env.example").read_text(encoding="utf-8")
     assigned = [line for line in template.splitlines() if "=" in line and not line.startswith("#")]
     assert len(assigned) >= 50
+
+
+# --- brand assets -----------------------------------------------------------
+
+BRAND = ROOT / "assets" / "brand"
+
+
+def _png_size(path: Path) -> tuple[int, int]:
+    """Width and height straight from the PNG header; no image library needed."""
+    header = path.read_bytes()[:24]
+    assert header[:8] == b"\x89PNG\r\n\x1a\n", f"{path.name} is not a PNG"
+    width, height = struct.unpack(">II", header[16:24])
+    return width, height
+
+
+def test_the_brand_assets_exist_in_both_formats():
+    for name in ("logo", "mark", "banner"):
+        assert (BRAND / f"{name}.svg").is_file(), f"{name}.svg is missing"
+        assert (BRAND / f"{name}.png").is_file(), f"{name}.png is missing"
+
+
+def test_the_logo_is_square_and_the_banner_is_wide():
+    assert _png_size(BRAND / "logo.png") == (512, 512)
+    assert _png_size(BRAND / "logo-192.png") == (192, 192)
+    assert _png_size(BRAND / "logo-64.png") == (64, 64)
+    assert _png_size(BRAND / "banner.png") == (1200, 400)
+
+
+def test_the_readmes_show_the_banner():
+    for name in ("README.md", "README.fa.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert "assets/brand/banner.png" in text, f"{name} does not show the banner"
+
+
+def test_the_brand_page_documents_every_asset():
+    """The palette page is where a contributor looks before redrawing anything."""
+    text = (BRAND / "README.md").read_text(encoding="utf-8")
+    for name in ("logo.svg", "mark.svg", "banner.svg", "logo-192.png", "logo-64.png"):
+        assert name in text, f"{name} is not described in assets/brand/README.md"
 
 
 def _sections(document: Path) -> int:

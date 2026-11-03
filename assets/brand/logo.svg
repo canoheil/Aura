@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Aura">
+  <title>Aura</title>
+  <desc>The Aura mark on a deep-indigo tile</desc>
+  <defs>
+    <linearGradient id="aura-bg" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#2E2760"/>
+      <stop offset="0.5" stop-color="#171334"/>
+      <stop offset="1" stop-color="#090713"/>
+    </linearGradient>
+    <radialGradient id="aura-glow" cx="0.5" cy="0.44" r="0.58">
+      <stop offset="0" stop-color="#8B79F0" stop-opacity="0.42"/>
+      <stop offset="0.65" stop-color="#5A4FD0" stop-opacity="0.1"/>
+      <stop offset="1" stop-color="#0B0920" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="aura-ray" x1="0.22" y1="0.02" x2="0.78" y2="0.98">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.24" stop-color="#DED3FF"/>
+      <stop offset="0.56" stop-color="#9B87F2"/>
+      <stop offset="0.82" stop-color="#68A6F6"/>
+      <stop offset="1" stop-color="#3FC9F4"/>
+    </linearGradient>
+    <linearGradient id="aura-halo" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#D3C9FF" stop-opacity="0.9"/>
+      <stop offset="0.55" stop-color="#9B87F2" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#3FC9F4" stop-opacity="0.3"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="114" fill="url(#aura-bg)"/>
+  <circle cx="256" cy="250" r="214" fill="url(#aura-glow)"/>
+
+  <circle cx="256" cy="256" r="176" fill="none" stroke="url(#aura-halo)" stroke-width="7"
+          stroke-linecap="round" stroke-dasharray="940 166" stroke-dashoffset="196"
+          transform="rotate(-62 256 256)"/>
+
+  <g transform="translate(256 256) scale(0.86) translate(-256 -256)">
+    <path d="M 256 44 Q 293 219 420 256 Q 293 293 256 468 Q 219 293 92 256 Q 219 219 256 44 Z"
+          fill="url(#aura-ray)"/>
+    <path d="M 256 74 Q 262 196 268 232 Q 256 246 244 232 Q 250 196 256 74 Z"
+          fill="#FFFFFF" opacity="0.55"/>
+  </g>
+
+  <path d="M 396 122 C 397 144 398 147 420 148 C 398 149 397 152 396 174 C 395 152 394 149 372 148 C 394 147 395 144 396 122 Z"
+        fill="#FFFFFF" opacity="0.85"/>
+  <path d="M 118 352 C 119 366 120 368 134 369 C 120 370 119 372 118 386 C 117 372 116 370 102 369 C 116 368 117 366 118 352 Z"
+        fill="#8FF0FF" opacity="0.85"/>
+</svg>

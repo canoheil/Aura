@@ -812,6 +812,220 @@ def grounded_reminder_task(sources: list[str], when: str) -> Optional[str]:
     return _message_without_spans(combined, [trigger.span(), (start, start + len(needle))])
 
 
+# --- model proposals --------------------------------------------------------
+# When the grammar above cannot read a phrase — «سه هفته دیگه», «آخر ماه» — a
+# model may propose the instant it means. Nothing it says is trusted: the phrase
+# must be a verbatim fragment of the user's message, and the instant must agree
+# with every clock, day and quantity inside that phrase. A phrase with nothing
+# to check against is refused, so "the model is confident" is never a reason.
+
+_MERIDIEM_HOURS = {
+    "صبح": ((5, 11),),
+    "بامداد": ((0, 5),),
+    "ظهر": ((11, 13),),
+    "بعدازظهر": ((12, 17),),
+    "عصر": ((15, 19),),
+    "شب": ((19, 23), (0, 3)),
+    "am": ((0, 11),),
+    "pm": ((12, 23),),
+}
+# Longest first: «بعدازظهر» must not be read as «ظهر» for the bucket check.
+_MERIDIEM_ORDER = sorted(_MERIDIEM_HOURS, key=len, reverse=True)
+
+_CLOCK_IN_PHRASE = re.compile(r"(?<![\d:])(\d{1,2}):(\d{2})(?![\d:])")
+_HOUR_AFTER_WORD = re.compile(
+    r"(?:ساعت|at)\s*(\d{1,2})(?![\d:])(?!\s*(?:دقیقه|ثانیه|روز|هفته|ماه|سال))", re.IGNORECASE,
+)
+# «ساعت ۹ و نیم» / «۹ و ربع» — the minutes are spoken, not written.
+_MINUTES_SPOKEN = re.compile(r"و\s*(نیم|ربع|(\d{1,2})\s*دقیقه)")
+_HOUR_BEFORE_MERIDIEM = re.compile(
+    r"(?<![\d:])(\d{1,2})\s*(بعد\s*از\s*ظهر|بعدازظهر|نیمه\s*شب|صبح|بامداد|ظهر|عصر|شب|a\.?m\.?|p\.?m\.?)",
+    re.IGNORECASE,
+)
+_GREGORIAN_IN_PHRASE = re.compile(r"(?<!\d)(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)")
+_EN_NUMBERS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+               "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
+_EN_NUMBER = "(?:" + "|".join(sorted(_EN_NUMBERS, key=len, reverse=True)) + ")"
+_QUANTITY_BEFORE_PERIOD = re.compile(
+    r"(?P<count>\d{1,5}|" + _WORD_NUMBER + r"|" + _EN_NUMBER + r")\s*"
+    r"(?P<unit>ثانیه|دقیقه|ساعت|روز|هفته|ماه|سال|seconds?|minutes?|hours?|days?|weeks?|months?|years?)",
+    re.IGNORECASE,
+)
+_PERIOD_SECONDS = {
+    "ثانیه": 1, "second": 1, "seconds": 1,
+    "دقیقه": 60, "minute": 60, "minutes": 60,
+    "ساعت": 3600, "hour": 3600, "hours": 3600,
+    "روز": 86400, "day": 86400, "days": 86400,
+    "هفته": 604800, "week": 604800, "weeks": 604800,
+    "ماه": 2629800, "month": 2629800, "months": 2629800,
+    "سال": 31557600, "year": 31557600, "years": 31557600,
+}
+# Times that the user spoke exactly get a tight window; months and years have
+# no fixed length, so they get the same slack a person would.
+_PERIOD_TOLERANCE = {"ثانیه": 120, "دقیقه": 180, "ساعت": 900, "روز": 86400,
+                     "هفته": 86400, "ماه": 4 * 86400, "سال": 4 * 86400}
+_PERIOD_SECONDS_UNIT = {
+    **{unit: unit for unit in _PERIOD_TOLERANCE},
+    "second": "ثانیه", "seconds": "ثانیه", "minute": "دقیقه", "minutes": "دقیقه",
+    "hour": "ساعت", "hours": "ساعت", "day": "روز", "days": "روز",
+    "week": "هفته", "weeks": "هفته", "month": "ماه", "months": "ماه",
+    "year": "سال", "years": "سال",
+}
+
+
+def _hour_matches(spoken: int, hour: int) -> bool:
+    """«۹» agrees with 09:00 and 21:00; only a meridiem settles which."""
+    return spoken == hour or (spoken <= 12 and (hour % 12 or 12) == spoken)
+
+
+def _weekday_index(word: str) -> Optional[int]:
+    token = re.sub(r"\s+", " ", _normalized(word).strip().lower())
+    token = token.replace("یک شنبه", "یک‌شنبه").replace("سه شنبه", "سه‌شنبه")
+    token = token.replace("چهار شنبه", "چهارشنبه").replace("پنج شنبه", "پنج‌شنبه").replace("دو شنبه", "دوشنبه")
+    if token in {"یکشنبه"}:
+        return _WEEKDAY_INDEX["یک‌شنبه"]
+    return _WEEKDAY_INDEX.get(token)
+
+
+def _check_phrase_against(phrase: str, local: datetime, now_local: datetime) -> None:
+    """Reject a proposal that the quoted phrase contradicts.
+
+    Every reading the phrase contains must agree with the proposed wall clock.
+    If the phrase contains no checkable reading at all, there is nothing to
+    verify — and an unverifiable time is not accepted, however plausible.
+    """
+    disagreements: list[str] = []
+
+    def disagree() -> None:
+        disagreements.append("mismatch")
+
+    for match in _CLOCK_IN_PHRASE.finditer(phrase):
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if local.minute != minute or not _hour_matches(hour, local.hour):
+            disagree()
+    spoken_hours = {int(m.group(1)) for m in _HOUR_AFTER_WORD.finditer(phrase)}
+    spoken_hours |= {int(m.group(1)) for m in _HOUR_BEFORE_MERIDIEM.finditer(phrase)}
+    for hour in spoken_hours:
+        if not _hour_matches(hour, local.hour):
+            disagree()
+    if spoken_hours:
+        for match in _MINUTES_SPOKEN.finditer(phrase):
+            spoken_minute = 30 if match.group(1) == "نیم" else 45 if match.group(1) == "ربع" else int(match.group(2))
+            if local.minute != spoken_minute:
+                disagree()
+    compact = phrase.replace(" ", "")
+    for word in _MERIDIEM_ORDER:
+        if word in compact:
+            if not any(low <= local.hour <= high for low, high in _MERIDIEM_HOURS[word]):
+                disagree()
+            break
+    today = now_local.date()
+    for match in re.finditer(rf"(?<!\w)({_DAY_WORD})(?!\w)", phrase, re.IGNORECASE):
+        word = match.group(1).lower()
+        expected = today + timedelta(days=1 if word in {"فردا", "tomorrow"} else 0)
+        if local.date() != expected:
+            disagree()
+    for match in re.finditer(_WEEKDAY_NAMES, phrase, re.IGNORECASE):
+        index = _weekday_index(match.group(0))
+        if index is not None and local.weekday() != index:
+            disagree()
+    for match in _GREGORIAN_IN_PHRASE.finditer(phrase):
+        if (local.year, local.month, local.day) != (
+            int(match.group(1)), int(match.group(2)), int(match.group(3))
+        ):
+            disagree()
+    for match in re.finditer(rf"(?<!\d)(\d{{1,2}})\s*({_JALALI_MONTH_PATTERN})", phrase):
+        jalali_year, jalali_month, jalali_day = _gregorian_to_jalali(local.year, local.month, local.day)
+        if jalali_day != int(match.group(1)) or _JALALI_MONTHS[jalali_month - 1] != match.group(2):
+            disagree()
+    if not spoken_hours and not _CLOCK_IN_PHRASE.search(phrase):
+        # «دو ساعت و سی دقیقه» is one duration in two parts, so the parts add up
+        # rather than competing. A stated clock is different: there «۹ و ۳۰
+        # دقیقه» is 09:30, and the minute check above already covered it.
+        expected = tolerance = 0
+        for match in _QUANTITY_BEFORE_PERIOD.finditer(phrase):
+            try:
+                count = _number_value(_normalized(match.group("count")))
+            except ReminderError:
+                count = _EN_NUMBERS.get(match.group("count").lower())
+            if count is None:
+                continue
+            unit = match.group("unit").lower()
+            expected += count * _PERIOD_SECONDS[unit]
+            tolerance = max(tolerance, _PERIOD_TOLERANCE[_PERIOD_SECONDS_UNIT[unit]])
+        if expected:
+            actual = (local - now_local).total_seconds()
+            if abs(actual - expected) > tolerance:
+                disagree()
+
+    if disagreements:
+        raise ReminderError("زمانی که گفتی با آنچه فهمیدم نمی‌خواند؛ دوباره و دقیق بگو.",
+                            code="ungrounded_time")
+    if not _ANCHOR_PRESENT.search(phrase):
+        raise ReminderError(
+            "این زمان آن‌قدر کلی است که نمی‌توانم درست ثبتش کنم؛ مثلاً «سه هفته دیگه ساعت ۹ صبح».",
+            code="ungrounded_time",
+        )
+
+
+# A phrase is only worth checking if it carries something concrete: a clock, a
+# day, a date, or a quantity with a period. «هفته دیگه» carries none of these.
+_ANCHOR_PRESENT = re.compile(
+    r"\d{1,2}:\d{2}"
+    r"|(?:ساعت|at)\s*\d{1,2}"
+    r"|\d{1,2}\s*(?:بعد\s*از\s*ظهر|بعدازظهر|نیمه\s*شب|صبح|بامداد|ظهر|عصر|شب|a\.?m\.?|p\.?m\.?)"
+    r"|\d{4}[-/]\d{1,2}[-/]\d{1,2}"
+    r"|\d{1,2}\s*(?:" + _JALALI_MONTH_PATTERN + r")"
+    r"|(?:" + _WORD_NUMBER + r"|" + _EN_NUMBER + r"|\d{1,5})\s*"
+    r"(?:ثانیه|دقیقه|ساعت|روز|هفته|ماه|سال|seconds?|minutes?|hours?|days?|weeks?|months?|years?)"
+    r"|(?<![\w])(?:" + _DAY_WORD + r")(?![\w])"
+    r"|(?<![\w])(?:" + _WEEKDAY_NAMES + r")(?![\w])",
+    re.IGNORECASE,
+)
+
+
+def validate_time_proposal(*, time_phrase: str, local_datetime: str, zone_name: str,
+                           now: Optional[datetime] = None) -> datetime:
+    """Accept a model-proposed instant only if the message itself corroborates it."""
+    zone = timezone_for(zone_name)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    current = current.astimezone(timezone.utc)
+    phrase = _normalized(time_phrase).strip()
+    if not phrase or len(phrase) > 160:
+        raise ReminderError("زمانی برای بررسی پیدا نکردم؛ دقیق‌تر بگو.", code="missing_time")
+    try:
+        local = datetime.fromisoformat(str(local_datetime or "").strip())
+    except (TypeError, ValueError):
+        raise ReminderError("زمان پیشنهادی خوانا نبود؛ دوباره و دقیق بگو.", code="ungrounded_time") from None
+    if local.tzinfo is not None:
+        local = local.replace(tzinfo=None)  # the wall clock is what was quoted
+    now_local = current.astimezone(zone).replace(tzinfo=None)
+    _check_phrase_against(phrase, local, now_local)
+    due = _local_to_utc(local, zone)
+    delta = (due - current).total_seconds()
+    if delta < 5:
+        raise ReminderError("این زمان گذشته است؛ زمان دیگری بفرست.", code="time_too_soon")
+    if delta > MAX_FUTURE_SECONDS:
+        raise ReminderError("زمان یادآوری بیش از پنج سال در آینده است.", code="time_too_far")
+    return due
+
+
+_TIME_WORDS = re.compile(
+    r"(?:ثانیه|دقیقه|ساعت|روز|هفته|ماه|سال|ربع|نیم|صبح|بامداد|ظهر|عصر|شب|"
+    r"فردا|امروز|دیروز|شنبه|یک\s*شنبه|سه\s*شنبه|چهار\s*شنبه|پنج\s*شنبه|دو\s*شنبه|جمعه|"
+    r"فروردین|اردیبهشت|خرداد|تیر|مرداد|شهریور|مهر|آبان|آذر|دی|بهمن|اسفند|"
+    r"هفتهٔ|آخر|اول|وسط|پایان|"
+    r"minute|hour|day|week|month|year|morning|evening|tonight|noon|afternoon|tonight)", re.IGNORECASE,
+)
+
+
+def looks_temporal(text: str) -> bool:
+    """Does the message name time at all? Gate for consulting a model at all."""
+    return bool(_TIME_WORDS.search(_normalized(text)))
+
+
 # --- presentation -----------------------------------------------------------
 
 def format_due(timestamp: int, zone_name: str) -> str:

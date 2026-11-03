@@ -57,6 +57,88 @@ def test_a_day_without_a_clock_is_completed_by_the_clock_alone(isolated_bot):
     assert format_due(rows[0]["due_utc"], DEFAULT_TIMEZONE).endswith("09:00:00 (Asia/Tehran)")
 
 
+def test_a_phrase_the_grammar_cannot_read_is_verified_by_the_model(isolated_bot):
+    """«سه هفته دیگه» is outside the parser; the model resolves it, the app checks it."""
+    from test_agent_tool_response import _tool_response
+
+    bot, client = isolated_bot
+    clock = [datetime(2026, 11, 3, 8, 30, tzinfo=timezone.utc).timestamp()]
+    bot.reminder_store.clock = lambda: clock[0]
+    client.models.responses = [
+        _tool_response("schedule_reminder", {
+            "when": "سه هفته دیگه", "task": "قبض رو بدم", "local_datetime": "2026-11-24T12:00",
+        }),
+        _text_response("باشه، یادت می‌ندازم."),
+    ]
+    reply = _send(bot, "یادم بنداز سه هفته دیگه قبض رو بدم")
+    rows = bot.reminder_store.list_active(123, 123)
+    assert len(rows) == 1
+    assert rows[0]["text"] == "قبض رو بدم"
+    assert rows[0]["due_utc"] == int(datetime(2026, 11, 24, 8, 30, tzinfo=timezone.utc).timestamp())
+    # Whatever the model says, the instant the app committed is always shown.
+    assert "۳ آذر ۱۴۰۵" in reply.message.reply_text.await_args.args[0]
+
+
+def test_a_model_instant_that_contradicts_the_words_is_never_committed(isolated_bot):
+    """The proposal says three weeks; the clock says one. Nothing is scheduled."""
+    from test_agent_tool_response import _tool_response
+
+    bot, client = isolated_bot
+    clock = [datetime(2026, 11, 3, 8, 30, tzinfo=timezone.utc).timestamp()]
+    bot.reminder_store.clock = lambda: clock[0]
+    client.models.responses = [
+        _tool_response("schedule_reminder", {
+            "when": "سه هفته دیگه", "task": "قبض رو بدم", "local_datetime": "2026-11-10T12:00",
+        }),
+    ]
+    reply = _send(bot, "یادم بنداز سه هفته دیگه قبض رو بدم")
+    assert not bot.reminder_store.list_active(123, 123)
+    assert "یادت می" not in reply.message.reply_text.await_args.args[0]
+
+
+def test_a_vague_time_gets_a_question_not_a_guess(isolated_bot):
+    from test_agent_tool_response import _tool_response
+
+    bot, client = isolated_bot
+    clock = [datetime(2026, 11, 3, 8, 30, tzinfo=timezone.utc).timestamp()]
+    bot.reminder_store.clock = lambda: clock[0]
+    client.models.responses = [
+        _tool_response("schedule_reminder", {
+            "when": "هفته دیگه", "task": "قبض رو بدم", "local_datetime": "2026-11-10T12:00",
+        }),
+    ]
+    reply = _send(bot, "یادم بنداز هفته دیگه قبض رو بدم")
+    assert not bot.reminder_store.list_active(123, 123)
+    # It explains why the phrase was too vague instead of silently picking a day.
+    assert "کلی است" in reply.message.reply_text.await_args.args[0]
+
+
+def test_the_parser_wins_over_the_model_when_both_can_read_the_time(isolated_bot):
+    """A proposal cannot move a reminder the grammar already understands."""
+    from test_agent_tool_response import _tool_response
+
+    bot, client = isolated_bot
+    clock = [datetime(2026, 11, 3, 8, 30, tzinfo=timezone.utc).timestamp()]
+    bot.reminder_store.clock = lambda: clock[0]
+    client.models.responses = [
+        _tool_response("schedule_reminder", {
+            "when": "۵ دقیقه دیگه", "task": "آب بخورم", "local_datetime": "2030-01-01T00:00",
+        }),
+        _text_response("باشه، یادت می‌ندازم."),
+    ]
+    _send(bot, "یادم بنداز ۵ دقیقه دیگه آب بخورم")
+    rows = bot.reminder_store.list_active(123, 123)
+    assert len(rows) == 1 and rows[0]["due_utc"] == clock[0] + 300
+
+
+def test_a_message_with_no_time_words_does_not_call_the_model(isolated_bot):
+    """Nothing to ground on, so asking is both cheaper and more honest."""
+    bot, client = isolated_bot
+    _send(bot, "یادم بنداز آب بخورم")
+    assert not client.models.requests
+    assert not bot.reminder_store.list_active(123, 123)
+
+
 def test_a_weekday_request_can_be_completed_with_an_afternoon_clock(isolated_bot):
     bot, client = isolated_bot
     client.models.responses = [_text_response("باشه، دوشنبه یادت می‌ندازم.")]

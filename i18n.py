@@ -327,6 +327,10 @@ CATALOG: dict[str, dict[str, str]] = {
         "fa": "زمان و متن یادآوری را واضح‌تر بگو؛ چیزی ثبت نکردم.",
         "en": "Please state the time and the task more clearly; nothing has been scheduled.",
     },
+    "reminder.err.ungrounded_time": {
+        "fa": "این زمان آن‌قدر کلی است که نمی‌توانم درست ثبتش کنم؛ مثلاً «سه هفته دیگه ساعت ۹ صبح».",
+        "en": "That time is too vague for me to pin down; for example \"in three weeks at 9 am\".",
+    },
     "reminder.err.storage": {
         "fa": "نتونستم یادآور را ذخیره کنم؛ لطفاً دوباره امتحان کن.",
         "en": "I could not save that reminder; please try again.",

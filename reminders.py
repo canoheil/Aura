@@ -40,12 +40,14 @@ from reminder_time import (
     grounded_reminder_task,
     has_recurring_reminder,
     is_reminder_request,
+    looks_temporal,
     parse_reminder,
     parse_reminder_time_expression,
     reminder_source_contains,
     reminder_time_reply,
     reminder_wording_matches_task,
     timezone_for,
+    validate_time_proposal,
 )
 
 logger = logging.getLogger("aura-reminders")
@@ -69,12 +71,14 @@ __all__ = [
     "grounded_reminder_task",
     "has_recurring_reminder",
     "is_reminder_request",
+    "looks_temporal",
     "parse_reminder",
     "parse_reminder_time_expression",
     "reminder_source_contains",
     "reminder_time_reply",
     "reminder_wording_matches_task",
     "timezone_for",
+    "validate_time_proposal",
 ]
 
 

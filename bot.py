@@ -66,6 +66,7 @@ from reply_context import (
 from error_handling import classify_gemini_error, classify_telegram_error, generic_user_error
 import providers
 import migrations
+import data_deletion
 from providers import ProviderError
 from settings_store import SPECS, SettingError, SettingsStore
 from admin_panel import AdminAccess, admin_callback, admin_command
@@ -249,6 +250,10 @@ _recent_image_context = ExpiringContext(RECENT_IMAGE_CONTEXT_TTL, max_entries=25
 _weather_choice_context = ExpiringContext(300, max_entries=256)
 # Follow-ups are temporary and scoped to the requesting user *and* chat. They
 # are not long-term memories or registered reminders.
+# A destructive command needs a second, explicit step; the preview stays valid
+# for five minutes so a stale "confirm" can never delete data the user has since
+# forgotten about.
+_pending_deletion = ExpiringContext(300, max_entries=256)
 _pending_reminder_context = ExpiringContext(600, max_entries=256)
 _last_reminder_context = ExpiringContext(600, max_entries=256)
 REMINDER_MODEL_TIMEOUT_SECONDS = 4.0
@@ -4472,6 +4477,90 @@ async def language_command(
     )
 
 
+def _deletion_preview(update: Update, counts: dict[str, int]) -> str:
+    """The exact list the user is about to confirm, in their language."""
+    lines = [tr("deletemydata.preview_header", update)]
+    for category in data_deletion.CATEGORIES:
+        count = int(counts.get(category.key) or 0)
+        if count:
+            lines.append(_t(category.label_key, user_language(update), count=count))
+    return "\n".join(lines)
+
+
+async def deletemydata_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Show, then really delete, everything Aura stores about this user.
+
+    Two steps on purpose: the preview is the promise, the second message is the
+    consent. Deletion is refused outside a private chat, because a group's
+    history is shared and contains other members' messages.
+    """
+    if not update.effective_user or not update.message:
+        return
+    if update.effective_chat and update.effective_chat.type in {"group", "supergroup"}:
+        await _safe_reply_text(update, tr("deletemydata.private_only", update))
+        return
+
+    user_id = update.effective_user.id
+    # Deleting the language row must not switch the wording of the final reply:
+    # the confirmation is written in the language the user asked in.
+    lang = user_language(update)
+    args = [str(part).strip().lower() for part in (getattr(context, "args", None) or [])]
+
+    if not args:
+        counts = data_deletion.plan(db, user_id, lock=db_lock)
+        if data_deletion.total(counts) == 0:
+            _pending_deletion.pop(user_id)
+            await _safe_reply_text(update, tr("deletemydata.preview_nothing", update))
+            return
+        _pending_deletion.put(user_id, {"requested_at": now()})
+        await _safe_reply_text(update, _deletion_preview(update, counts) + tr("deletemydata.preview_footer", update))
+        return
+
+    if len(args) != 1 or args[0] not in {"confirm", "cancel"}:
+        await _safe_reply_text(update, tr("deletemydata.usage", update))
+        return
+
+    if args[0] == "cancel":
+        _pending_deletion.pop(user_id)
+        await _safe_reply_text(update, tr("deletemydata.cancelled", update))
+        return
+
+    # A confirmation without a fresh preview is not consent: the user may have
+    # typed it from memory, or a much larger amount of data may have piled up.
+    if not _pending_deletion.get(user_id):
+        await _safe_reply_text(update, tr("deletemydata.need_preview", update))
+        return
+    _pending_deletion.pop(user_id)
+    try:
+        deleted = data_deletion.delete(db, user_id, lock=db_lock)
+    except Exception:
+        logger.exception("Data deletion failed | user=%s", user_id)
+        await _safe_reply_text(update, _t("deletemydata.failed", lang))
+        return
+
+    # Ephemeral state lives in memory, not the database, but it is still "about"
+    # this user: drop it in the same breath.
+    for cache in (_recent_image_context, _weather_choice_context,
+                  _pending_reminder_context, _last_reminder_context):
+        try:
+            cache.discard_chat(user_id)
+        except Exception:
+            logger.warning("Could not clear an in-memory context", exc_info=True)
+    _bare_call_last.clear()
+
+    remaining = data_deletion.plan(db, user_id, lock=db_lock)
+    logger.info(
+        "User data deletion confirmed | user=%s | deleted=%s | remaining=%s",
+        user_id, data_deletion.total(deleted), data_deletion.total(remaining),
+    )
+    await _safe_reply_text(
+        update, _t("deletemydata.done", lang, count=data_deletion.total(deleted))
+    )
+
+
 async def new_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -6802,6 +6891,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("cancelreminder", cancel_reminder_command))
     application.add_handler(CommandHandler("timezone", timezone_command))
     application.add_handler(CommandHandler("language", language_command))
+    application.add_handler(CommandHandler("deletemydata", deletemydata_command))
     # Owner/admin panel. The panel enforces its own access rules (founder plus
     # ADMIN_USER_IDS) and works in private chats only.
     application.add_handler(CommandHandler("admin", admin_panel_command))

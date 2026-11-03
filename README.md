@@ -560,7 +560,46 @@ Aura stores conversation history, web-search cache/usage, and long-term memory i
 
 If you are updating an existing Aura installation, keep its existing `bot.db`. The application is designed to preserve and migrate the existing database schema non-destructively.
 
-### Schema versions and migrations
+## Your data, and deleting it
+
+Aura stores conversation history, long-term memory, reminders, the reminder
+timezone and the language choice, all keyed by the Telegram user (private chats)
+or chat ID (groups). Nothing is sent anywhere except the requests needed to
+answer a message.
+
+`/deletemydata` deletes all of it for the person asking, in two steps:
+
+```
+/deletemydata            show exactly what is stored, with counts
+/deletemydata confirm    really delete it (valid for 5 minutes)
+/deletemydata cancel     change your mind
+```
+
+- The preview is the promise: both messages are rendered from the same
+  `CATEGORIES` list in `data_deletion.py`, and a test fails if a personal table
+  is added without being listed there.
+- The wipe is one transaction across every table, so a failure leaves the data
+  intact instead of half-deleted.
+- It only works in a **private chat**. A group's history is shared and contains
+  other members' messages, so clearing it from one member's command would delete
+  everyone's.
+- Shared, non-personal state is deliberately untouched: the web-search cache and
+  its daily counters, `app_settings`/`app_settings_audit`, `allowed_groups` and
+  the sticker cache.
+- The confirmation is written in the language the user was using, even though
+  the language row itself is gone by then.
+
+Deleting rows does not shrink the file on disk (SQLite reuses the freed pages).
+To reclaim space on a server:
+
+```bash
+sqlite3 bot.db 'VACUUM'
+```
+
+Backups are the deployment's responsibility: Aura cannot delete copies that
+already exist in an operator's `bot.db.bak`.
+
+## Schema versions and migrations
 
 Every table is created with `CREATE TABLE IF NOT EXISTS` by the module that owns
 it, so a fresh database and an existing one converge on the same schema. Changes

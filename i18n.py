@@ -82,6 +82,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "/cancelreminder <id> — لغو یادآور\n"
             "/timezone [Asia/Tehran] — نمایش یا تغییر منطقهٔ زمانی یادآور\n"
             "/language — تغییر زبان\n"
+            "/deletemydata — دیدن و پاک کردن همهٔ داده‌های شخصی\n"
             "/whoami — نمایش Telegram ID و وضعیت سازنده"
         ),
         "en": (
@@ -105,6 +106,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "/cancelreminder <id> — cancel a reminder\n"
             "/timezone [Europe/Berlin] — show or change the reminder timezone\n"
             "/language — change the language\n"
+            "/deletemydata — see and delete everything stored about you\n"
             "/whoami — show your Telegram ID and founder status"
         ),
     },
@@ -655,6 +657,85 @@ CATALOG: dict[str, dict[str, str]] = {
     "error.generic": {
         "fa": "❌ یک خطای غیرمنتظره رخ داد. دوباره امتحان کن.",
         "en": "❌ An unexpected error occurred. Please try again.",
+    },
+    # --- /deletemydata ------------------------------------------------------
+    "deletemydata.private_only": {
+        "fa": "این دستور فقط در چت خصوصی کار می‌کند. در گروه نمی‌توانم تاریخچهٔ گفتگو را پاک کنم، "
+              "چون پیام‌های اعضای دیگر هم در همان تاریخچه است. لطفاً در چت خصوصی با من /deletemydata را بفرست.",
+        "en": "This only works in a private chat. In a group I cannot clear the history, because it also "
+              "contains other members' messages. Send /deletemydata to me in a private chat.",
+    },
+    "deletemydata.preview_header": {
+        "fa": "🧹 این‌ها همهٔ چیزهایی است که دربارهٔ تو ذخیره کرده‌ام:",
+        "en": "🧹 This is everything I have stored about you:",
+    },
+    "deletemydata.item.messages": {
+        "fa": "• پیام‌های گفتگو: {count}",
+        "en": "• Conversation messages: {count}",
+    },
+    "deletemydata.item.model": {
+        "fa": "• تنظیم مدل شخصی: {count}",
+        "en": "• Your model preference: {count}",
+    },
+    "deletemydata.item.summary": {
+        "fa": "• خلاصهٔ گفتگوهای قدیمی: {count}",
+        "en": "• Rolling conversation summary: {count}",
+    },
+    "deletemydata.item.video": {
+        "fa": "• ویدیوی در حال بررسی: {count}",
+        "en": "• Remembered YouTube video: {count}",
+    },
+    "deletemydata.item.memories": {
+        "fa": "• حافظهٔ بلندمدت: {count}",
+        "en": "• Long-term memories: {count}",
+    },
+    "deletemydata.item.reminders": {
+        "fa": "• یادآورها: {count}",
+        "en": "• Reminders: {count}",
+    },
+    "deletemydata.item.timezone": {
+        "fa": "• منطقهٔ زمانی یادآورها: {count}",
+        "en": "• Reminder timezone: {count}",
+    },
+    "deletemydata.item.language": {
+        "fa": "• زبان انتخابی: {count}",
+        "en": "• Your language choice: {count}",
+    },
+    "deletemydata.preview_footer": {
+        "fa": "\nاین کار برگشت‌پذیر نیست. تأیید: /deletemydata confirm\nانصراف: /deletemydata cancel\n"
+              "(تأیید تا ۵ دقیقه معتبر است.)",
+        "en": "\nThis cannot be undone. To confirm: /deletemydata confirm\nTo cancel: /deletemydata cancel\n"
+              "(The confirmation is valid for 5 minutes.)",
+    },
+    "deletemydata.preview_nothing": {
+        "fa": "🧹 چیز شخصی‌ای دربارهٔ تو ذخیره نکرده‌ام؛ چیزی برای پاک کردن نیست.",
+        "en": "🧹 I have nothing personal stored about you, so there is nothing to delete.",
+    },
+    "deletemydata.need_preview": {
+        "fa": "برای اینکه اشتباهی پاک نشود، اول /deletemydata را بفرست تا ببینی چه چیزی پاک می‌شود، "
+              "بعد با /deletemydata confirm تأیید کن.",
+        "en": "So nothing is deleted by accident, send /deletemydata first to see what would be removed, "
+              "then confirm with /deletemydata confirm.",
+    },
+    "deletemydata.done": {
+        "fa": "✅ پاک شد. {count} مورد شخصی حذف شد و از این به بعد مثل یک کاربر تازه با تو رفتار می‌کنم. "
+              "چیزهای مشترک (مثل کش جست‌وجو و تنظیمات ربات) دست نخوردند.",
+        "en": "✅ Done. {count} personal item(s) removed, and from now on I treat you like a new user. "
+              "Shared state (such as the search cache and the bot's settings) was left untouched.",
+    },
+    "deletemydata.cancelled": {
+        "fa": "باشه، چیزی پاک نکردم.",
+        "en": "Fine — nothing was deleted.",
+    },
+    "deletemydata.failed": {
+        "fa": "❌ نتوانستم پاک کنم و چیزی تغییر نکرد. لطفاً دوباره امتحان کن.",
+        "en": "❌ I could not delete anything, and nothing was changed. Please try again.",
+    },
+    "deletemydata.usage": {
+        "fa": "🧹 /deletemydata — دیدن و پاک کردن همهٔ داده‌های شخصی‌ات\n"
+              "/deletemydata confirm — تأیید پاک کردن\n/deletemydata cancel — انصراف",
+        "en": "🧹 /deletemydata — see and delete everything stored about you\n"
+              "/deletemydata confirm — confirm the deletion\n/deletemydata cancel — cancel",
     },
     # --- weather -----------------------------------------------------------
     "weather.failed": {"fa": "نتونستم هوا رو دریافت کنم؛ لطفاً دوباره امتحان کن.", "en": "I could not fetch the weather; please try again."},

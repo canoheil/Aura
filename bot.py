@@ -59,6 +59,7 @@ import svg_image
 from svg_image import SvgError, render_svg_image
 from reaction_manager import reaction_manager
 from sticker_manager import sticker_manager
+import sticker_vision
 from reply_context import (
     build_reply_context,
     build_request_with_reply_context,
@@ -5242,6 +5243,34 @@ def build_video_messages(
     return messages
 
 
+async def download_sticker(
+    sticker,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    lang: Optional[str] = None,
+) -> tuple[bytes, str, "sticker_vision.StickerPlan"]:
+    """Download the still image that represents one Telegram sticker.
+
+    Static stickers arrive as full-resolution WebP. Animated (``.tgs``) and
+    video (``.webm``) stickers cannot be read by the model at all, so their
+    still thumbnail is downloaded instead; the plan records that, and the prompt
+    tells the model it is looking at a single frame.
+    """
+    plan = sticker_vision.plan_sticker(sticker)
+    if plan is None:
+        raise MediaInputError(_t("sticker.no_preview", lang))
+    raw = await _download_inline_file(
+        plan.file_id, context, known_size=plan.file_size, limit=MAX_IMAGE_BYTES, lang=lang,
+    )
+    # Telegram serves static stickers as WebP and thumbnails as WebP or JPG.
+    # A wrong MIME type fails before the model sees anything, so trust the bytes
+    # over the assumption; anything that is not an image never reaches the model.
+    mime_type = sticker_vision.sniff_image_mime(raw)
+    if not mime_type:
+        raise MediaInputError(_t("sticker.no_preview", lang))
+    return raw, mime_type, plan
+
+
 async def download_replied_media(
     reply_message,
     context: ContextTypes.DEFAULT_TYPE,
@@ -5251,6 +5280,11 @@ async def download_replied_media(
     """Download the replied-to Telegram media for inline Gemini analysis."""
     if reply_message is None:
         raise GeminiAPIError("No replied-to message was found.")
+
+    if getattr(reply_message, "sticker", None) is not None:
+        # Replying to a sticker is the same picture path as sending one.
+        raw, mime_type, _plan = await download_sticker(reply_message.sticker, context, lang=lang)
+        return raw, mime_type, "sticker"
 
     media = None
     mime_type = "application/octet-stream"
@@ -6245,8 +6279,13 @@ async def message_handler(
     image_requested = bool(update.message.photo)
     document_requested = bool(update.message.document)
     inline_document_mime = _inline_document_mime(update.message.document) if document_requested else ""
+    # getattr, not attribute access: test doubles and older payloads may not
+    # carry a sticker field at all.
+    incoming_sticker = getattr(update.message, "sticker", None)
+    sticker_requested = incoming_sticker is not None
     media_requested = any(
-        bool(getattr(update.message, attr, None)) for attr in ("voice", "audio", "video", "video_note", "animation")
+        bool(getattr(update.message, attr, None))
+        for attr in ("voice", "audio", "video", "video_note", "animation", "sticker")
     )
 
     if is_group(update) and text:
@@ -6403,7 +6442,7 @@ async def message_handler(
         reply_has_media = bool(
             replied_to and any(
                 getattr(replied_to, attr, None)
-                for attr in ("photo", "document", "video", "video_note", "audio", "voice", "animation")
+                for attr in ("photo", "document", "video", "video_note", "audio", "voice", "animation", "sticker")
             )
         )
 
@@ -6441,7 +6480,14 @@ async def message_handler(
             if image_reference:
                 _recent_image_context.put(image_context_key, image_reference)
             identity_prefix = build_message_identity_context(update.message).prompt_block() + "\n"
-            prompt_text = identity_prefix + (text or f"این {media_label} را بررسی کن و محتوایش را توضیح بده.")
+            sticker_plan = sticker_vision.plan_sticker(getattr(replied_to, "sticker", None))
+            if sticker_plan is not None:
+                # A replied sticker needs the same framing as a sent one: the
+                # model must know it is a reaction and, for animated stickers,
+                # that it only has one frame.
+                prompt_text = identity_prefix + sticker_vision.describe_for_model(sticker_plan, text)
+            else:
+                prompt_text = identity_prefix + (text or f"این {media_label} را بررسی کن و محتوایش را توضیح بده.")
             if reply_context:
                 prompt_text = reply_context + "\n\nREPLIED MEDIA: [attached directly for analysis]\n\nCURRENT MESSAGE:\n" + prompt_text
             request_messages = build_reply_media_request(
@@ -6489,6 +6535,25 @@ async def message_handler(
                 prompt_text = reply_context + "\n\nCURRENT MESSAGE:\n" + prompt_text
             request_messages = build_image_messages(history, prompt_text, image_bytes, image_mime)
             saved_user_content = prompt_text + " [image]"
+        elif sticker_requested:
+            sticker_bytes, sticker_mime, sticker_plan = await download_sticker(
+                incoming_sticker, context, lang=user_language(update),
+            )
+            identity_prefix = build_message_identity_context(update.message).prompt_block() + "\n"
+            prompt_text = identity_prefix + sticker_vision.describe_for_model(sticker_plan, text)
+            if reply_context:
+                prompt_text = reply_context + "\n\nCURRENT MESSAGE:\n" + prompt_text
+            request_messages = build_reply_media_request(history, prompt_text, sticker_bytes, sticker_mime)
+            saved_user_content = make_user_message(update, text or "[sticker]")
+            logger.info(
+                "Sticker attached | chat=%s message=%s kind=%s thumbnail=%s mime=%s bytes=%s",
+                history_id,
+                update.message.message_id,
+                sticker_plan.kind,
+                sticker_plan.from_thumbnail,
+                sticker_mime,
+                len(sticker_bytes),
+            )
         elif media_requested or (document_requested and inline_document_mime):
             media_bytes, media_mime, media_label = await download_replied_media(
                 update.message, context, lang=user_language(update),
@@ -7026,7 +7091,10 @@ def build_application() -> Application:
     )
     application.add_handler(
         MessageHandler(
-            (filters.TEXT | filters.PHOTO | filters.Document.ALL | filters.VOICE | filters.AUDIO | filters.VIDEO | filters.VIDEO_NOTE | filters.ANIMATION) & ~filters.COMMAND,
+            (
+                filters.TEXT | filters.PHOTO | filters.Document.ALL | filters.VOICE | filters.AUDIO
+                | filters.VIDEO | filters.VIDEO_NOTE | filters.ANIMATION | filters.Sticker.ALL
+            ) & ~filters.COMMAND,
             message_handler,
         )
     )

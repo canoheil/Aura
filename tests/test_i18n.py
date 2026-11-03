@@ -4,10 +4,13 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from test_agent_tool_response import _telegram_update, _text_response
 
 import i18n
 from i18n import LanguageStore, normalize_language, resolve_language, t
-from test_agent_tool_response import _telegram_update, _text_response
+
+# Tests live in tests/; the application modules stay at the repository root.
+ROOT = Path(__file__).resolve().parent.parent
 
 # --- catalog ---------------------------------------------------------------
 
@@ -187,7 +190,7 @@ def test_every_reminder_error_code_has_a_translation():
     """A reminder error can only reach the user if its code is in the catalog."""
     import ast
 
-    tree = ast.parse(Path("reminders.py").read_text(encoding="utf-8"))
+    tree = ast.parse((ROOT / "reminders.py").read_text(encoding="utf-8"))
     codes = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or getattr(node.func, "id", None) != "ReminderError":
@@ -270,7 +273,7 @@ def test_every_key_used_in_source_exists():
 
     used = set()
     for name in ("bot.py", "providers.py", "error_handling.py", "reminders.py"):
-        tree = ast.parse(Path(name).read_text(encoding="utf-8"))
+        tree = ast.parse((ROOT / name).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -297,7 +300,7 @@ def test_no_persian_literal_is_sent_straight_to_the_user():
     import ast
 
     persian = __import__("re").compile("[\u0600-\u06FF]")
-    tree = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    tree = ast.parse((ROOT / "bot.py").read_text(encoding="utf-8"))
     offenders = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):

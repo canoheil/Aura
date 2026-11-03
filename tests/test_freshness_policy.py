@@ -17,7 +17,7 @@ import pytest
 import freshness_policy as fp
 from freshness_policy import LEVEL_FORCE, LEVEL_HINT, LEVEL_OFF
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 
 # ---------- the three levels ----------

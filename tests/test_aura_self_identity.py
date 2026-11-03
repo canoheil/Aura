@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from aura_self_identity import AuraSelfIdentityBoundary
 
 
@@ -21,6 +23,6 @@ def test_self_identity_does_not_invent_creator_name():
 
 
 def test_bot_injects_boundary():
-    source = open("bot.py", encoding="utf-8").read()
+    source = (Path(__file__).resolve().parent.parent / "bot.py").read_text(encoding="utf-8")
     assert "AuraSelfIdentityBoundary" in source
     assert 'AuraSelfIdentityBoundary().system_context()' in source

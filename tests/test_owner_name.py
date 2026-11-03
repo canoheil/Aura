@@ -1,8 +1,8 @@
 """The optional OWNER_NAME: a convenience when set, harmless when missing."""
 import pytest
+from test_agent_tool_response import _telegram_update
 
 from aura_identity import AuraIdentity
-from test_agent_tool_response import _telegram_update
 
 # --- the identity context ---------------------------------------------------
 

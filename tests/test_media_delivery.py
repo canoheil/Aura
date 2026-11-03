@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 from telegram.error import BadRequest
+from test_agent_tool_response import IMAGE, _declared_names, _telegram_update, _text_response
 
 from ephemeral_context import ExpiringContext
-from test_agent_tool_response import IMAGE, _declared_names, _telegram_update, _text_response
 
 
 def _inline_part(client, request_index=-1):

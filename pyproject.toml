@@ -37,11 +37,13 @@ dependencies = []
 py-modules = ["bot"]
 
 # --- pytest ----------------------------------------------------------------
-# Tests live next to the flat application modules, so the repository root is the
-# test root as well. Configuration lives here (not in pytest.ini) so every tool
-# is configured in one file.
+# Tests live in tests/; the application modules stay flat at the repository root.
+# `pythonpath = ["."]` puts that root on sys.path, so a test can import `bot`,
+# `i18n` or any other module without path juggling of its own. Configuration
+# lives here (not in pytest.ini) so every tool is configured in one file.
 [tool.pytest.ini_options]
-testpaths = ["."]
+testpaths = ["tests"]
+pythonpath = ["."]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 python_classes = ["Test*"]
@@ -77,7 +79,4 @@ ignore = []
 [tool.ruff.lint.per-file-ignores]
 # Test modules import helpers from the shared harness on purpose; the fixtures
 # themselves are re-exported once in conftest.py.
-"conftest.py" = ["F401"]
-
-[tool.ruff.lint.isort]
-known-first-party = ["conftest"]
+"**/conftest.py" = ["F401"]

@@ -2,7 +2,7 @@ from pathlib import Path
 
 from telegram_formatting import render_telegram_html
 
-BOT_SOURCE = (Path(__file__).resolve().parent / "bot.py").read_text()
+BOT_SOURCE = (Path(__file__).resolve().parent.parent / "bot.py").read_text()
 
 
 def test_system_prompt_requires_usefulness_decision():

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from sticker_manager import StickerManager, sticker_manager
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 VALID_STICKERS = [
     {"position": 1, "tag": "angry_cute", "description": "Cute stubborn anger"},

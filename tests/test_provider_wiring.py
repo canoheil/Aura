@@ -34,7 +34,7 @@ def _load_bot(monkeypatch, env):
         setup.setattr(sqlite3, "connect", lambda _path, **kw: real_connect(":memory:", **kw))
         setup.setattr(genai, "Client", _fake_client)
         spec = importlib.util.spec_from_file_location(
-            "_wiring_aura_bot", Path(__file__).with_name("bot.py")
+            "_wiring_aura_bot", Path(__file__).resolve().parent.parent / "bot.py"
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)

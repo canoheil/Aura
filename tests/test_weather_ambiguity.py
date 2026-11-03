@@ -1,10 +1,10 @@
 import asyncio
 
 import pytest
-
-import weather_api
 from test_agent_tool_response import _telegram_update, _text_response, _tool_response
 from test_weather_api import _FakeSession, make_forecast_response, make_geo_response
+
+import weather_api
 
 PLACES = [
     {"name": "Springfield", "admin1": "Illinois", "country": "United States", "country_code": "US", "latitude": 39.8, "longitude": -89.6, "timezone": "America/Chicago"},

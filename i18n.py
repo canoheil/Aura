@@ -261,7 +261,38 @@ CATALOG: dict[str, dict[str, str]] = {
         ),
     },
     "reminders.none": {"fa": "در این گفتگو یادآور فعالی نداری.", "en": "You have no active reminders in this chat."},
-    "reminders.header": {"fa": "⏰ یادآورهای این گفتگو:", "en": "⏰ Reminders in this chat:"},
+    "reminders.header": {
+        "fa": "⏰ یادآورهای این گفتگو ({zone}):",
+        "en": "⏰ Reminders in this chat ({zone}):",
+    },
+    # --- reminder buttons ---------------------------------------------------
+    "reminder.button.snooze": {"fa": "⏰ {minutes} دقیقه بعد", "en": "⏰ In {minutes} min"},
+    "reminder.button.done": {"fa": "✅ انجام شد", "en": "✅ Done"},
+    "reminder.button.cancel": {"fa": "✖️ لغو این یادآور", "en": "✖️ Cancel this reminder"},
+    "reminder.callback.not_yours": {
+        "fa": "این یادآور مال تو نیست.",
+        "en": "That reminder isn't yours.",
+    },
+    "reminder.callback.gone": {
+        "fa": "این یادآور دیگر فعال نیست؛ کاری لازم نیست.",
+        "en": "That reminder is no longer active; nothing to do.",
+    },
+    "reminder.callback.done": {"fa": "انجامش دادی؛ ثبت شد.", "en": "Marked as done."},
+    "reminder.callback.snoozed": {
+        "fa": "باشه، {when} دوباره یادت می‌ندازم.",
+        "en": "Okay — I'll remind you again {when}.",
+    },
+    "reminder.callback.cancelled": {"fa": "لغو شد.", "en": "Cancelled."},
+    "reminder.callback.failed": {
+        "fa": "نتونستم انجامش بدم؛ لطفاً دوباره امتحان کن.",
+        "en": "I couldn't do that; please try again.",
+    },
+    "reminder.delivery.done_mark": {"fa": "✅ انجام شد", "en": "✅ Done"},
+    "reminder.delivery.cancelled_mark": {"fa": "✖️ لغو شد", "en": "✖️ Cancelled"},
+    "reminder.delivery.snoozed_mark": {
+        "fa": "⏰ برای {when} دوباره تنظیم شد",
+        "en": "⏰ Moved to {when}",
+    },
     "reminders.status.failed": {
         "fa": "ارسال ناموفق؛ دوباره ثبت کن یا لغوش کن",
         "en": "delivery failed; re-create or cancel it",
@@ -443,6 +474,14 @@ CATALOG: dict[str, dict[str, str]] = {
     "reminder.status.confirmed": {
         "fa": "آره، یادآور #{id} ثبت شده ({status}): {text}\nزمان: {due}",
         "en": "Yes, reminder #{id} is saved ({status}): {text}\nTime: {due}",
+    },
+    "reminder.status.done": {
+        "fa": "یادآور #{id} رو خودت انجام‌شده علامت زدی؛ دوباره فرستاده نمی‌شه.",
+        "en": "You marked reminder #{id} as done; it will not be sent again.",
+    },
+    "reminder.cancel.done_already": {
+        "fa": "یادآور #{id} قبلاً انجام‌شده علامت خورده و فعال نیست.",
+        "en": "Reminder #{id} was already marked as done and is no longer active.",
     },
     "reminder.status.already_sent": {
         "fa": "یادآور #{id} رو قبلاً فرستادم.",

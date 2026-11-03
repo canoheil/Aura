@@ -16,7 +16,7 @@ Aura is open source under the [MIT License](LICENSE). Contributions are welcome 
 - Long-term memory
 - Guarded You.com web search
 - Group-chat triggers and speaker awareness
-- Telegram photos, image documents, direct voice/audio/video and short-term image follow-ups
+- Telegram photos, image documents, stickers, direct voice/audio/video and short-term image follow-ups
 - Persistent one-shot reminders with a per-user timezone, listing and cancellation
 - Bounded concurrency across chats, with sequential updates within each chat
 - Image generation from text and image-to-image editing via Pollinations.ai (optional)
@@ -260,6 +260,16 @@ language: extend `i18n.LANGUAGES`, add the code to `LANGUAGE_NAMES` and fill in
 ## Stickers
 
 Smart sticker sending maps English tags from `stickers_config.json` (committed, no secrets) onto a Telegram sticker pack fetched with `getStickerSet` at startup. Sticker `file_id`s are cached in `bot.db` (`sticker_cache`) only as a fallback and are never exposed to the model. If the pack cannot be loaded, the feature disables itself and normal text replies continue.
+
+Reading goes the other way. A sticker the user sends, or answers to, is passed to
+the model as a picture: a static WebP sticker at full resolution, and an animated
+(`.tgs`) or video (`.webm`) sticker as Telegram's still thumbnail, because there is
+no Lottie renderer in the dependency list and adding one is out of scope. The
+prompt says which of the two it is and, for the thumbnail case, that it is a single
+frame — otherwise the model cheerfully claims to have watched the animation. The
+sender's emoji and the pack name travel with the request as text, and a sticker
+sent without words is stored as `[sticker]`. Stickers are not an invitation: in
+groups Aura still only looks at them when she was addressed.
 
 ## Images
 

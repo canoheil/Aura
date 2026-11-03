@@ -660,6 +660,11 @@ CATALOG: dict[str, dict[str, str]] = {
         "fa": "❌ یک خطای غیرمنتظره رخ داد. دوباره امتحان کن.",
         "en": "❌ An unexpected error occurred. Please try again.",
     },
+    # --- stickers (reading) -------------------------------------------------
+    "sticker.no_preview": {
+        "fa": "این استیکر تصویر قابل خواندنی ندارد؛ نتوانستم ببینمش. اگر مهم است، یک عکس از آن بفرست.",
+        "en": "This sticker has no readable image, so I couldn't look at it. If it matters, send a screenshot of it.",
+    },
     # --- per-user quota -----------------------------------------------------
     "quota.turns_reached": {
         "fa": "⏳ سهمیهٔ امروزت تمام شده: {used} از {limit} پیام.\nسهمیه ساعت {reset} (به وقت {zone}) دوباره پر می‌شود.",

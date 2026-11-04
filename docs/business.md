@@ -150,9 +150,21 @@ Telegram ──▶ business_connection ──▶ business_connection_handler ─
   account; the connection id comes from the update, never from the model.
 - **The group whitelist does not gate a customer's chat.** That chat belongs to
   the owner's business account, not to this deployment's allowed groups.
-- **No tools, no memory, no web search.** The customer gets one bounded model
-  call with the secretary prompt and that chat's own transcript — never
-  `ask_model`, which is built for the owner.
+- **One engine, one prompt.** A business reply is a normal Aura turn:
+  `build_system_prompt()` — identity, personality, style, date anchor, search
+  policy — with the situational layer from `secretary_prompt()` appended, never
+  substituted. The old separate persona is what made the mode sound like a
+  different, stiffer bot. `allow_media_tools=False` keeps the prompt from
+  advertising a sticker or image tool the turn cannot use.
+- **The owner's private tools are removed twice.** `BUSINESS_EXCLUDED_TOOLS`
+  (`memory_search`, `memory_save`, `memory_forget`, `schedule_reminder`, plus the
+  outbound-media tools until they are delivered) is applied to the Gemini
+  declarations *and* to the runner (`ToolRegistry.without` + `_restricted_runner`),
+  so a hallucinated `memory_save` call is refused instead of executed. Search,
+  `web_open` and weather are available exactly as in any other chat.
+- **Only that chat's transcript rides along.** No owner history, no memory, no
+  files; the module still reads its own `business_messages` rows and nothing
+  else. The connection id comes from the update, never from the model.
 
 ## Settings
 

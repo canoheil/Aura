@@ -227,13 +227,18 @@ BUSINESS_GROUP_CONTEXT_ENABLED = os.getenv("BUSINESS_GROUP_CONTEXT_ENABLED", "tr
 }
 try:
     BUSINESS_GROUP_CONTEXT_GROUPS = max(1, min(10, int(os.getenv("BUSINESS_GROUP_CONTEXT_GROUPS", "3"))))
+    # How many memberships may be asked about for one message. A stranger's first
+    # message pays for these, so the number is a latency budget, not a limit on
+    # how much Aura knows: quiet groups are dropped before any check happens.
+    BUSINESS_GROUP_CONTEXT_CHECKS = max(1, min(20, int(os.getenv("BUSINESS_GROUP_CONTEXT_CHECKS", "6"))))
     BUSINESS_GROUP_CONTEXT_MESSAGES = max(1, min(20, int(os.getenv("BUSINESS_GROUP_CONTEXT_MESSAGES", "6"))))
     BUSINESS_GROUP_CONTEXT_MAX_CHARS = max(200, min(4000, int(os.getenv("BUSINESS_GROUP_CONTEXT_MAX_CHARS", "1200"))))
     BUSINESS_MEMBERSHIP_TTL_SECONDS = max(60, int(os.getenv("BUSINESS_MEMBERSHIP_TTL_SECONDS", "21600")))
 except ValueError:
     raise RuntimeError(
-        "BUSINESS_GROUP_CONTEXT_GROUPS, BUSINESS_GROUP_CONTEXT_MESSAGES, "
-        "BUSINESS_GROUP_CONTEXT_MAX_CHARS and BUSINESS_MEMBERSHIP_TTL_SECONDS must be integers."
+        "BUSINESS_GROUP_CONTEXT_GROUPS, BUSINESS_GROUP_CONTEXT_CHECKS, "
+        "BUSINESS_GROUP_CONTEXT_MESSAGES, BUSINESS_GROUP_CONTEXT_MAX_CHARS and "
+        "BUSINESS_MEMBERSHIP_TTL_SECONDS must be integers."
     ) from None
 # Handler groups. Each business event gets its own group because python-telegram-
 # bot runs at most one matching handler per group: sharing with the catch-all
@@ -5147,6 +5152,31 @@ async def _business_download_media(
                                hint=hints.get(label, ""))
 
 
+async def _business_membership(bot: Bot, chat_id: int, user_id: int) -> Optional[bool]:
+    """Is this person in that group? ``None`` when Telegram did not say.
+
+    A cached answer is free; a failed call is reported as unknown rather than
+    "no", so the caller can tell "not a member" apart from "could not check".
+    Neither is cached, which keeps a network blip from excluding someone for the
+    whole TTL.
+    """
+    cached = GROUP_MEMBERSHIP.get(chat_id, user_id)
+    if cached is not None:
+        return cached
+    try:
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=int(user_id))
+    except Exception as exc:
+        logger.info("Group membership check failed; treating as unknown | group=%s | %s",
+                    chat_id, type(exc).__name__)
+        return None
+    value = group_memory.is_member_status(
+        str(getattr(member, "status", "") or ""),
+        restricted_is_member=bool(getattr(member, "is_member", False)),
+    )
+    GROUP_MEMBERSHIP.put(chat_id, user_id, value)
+    return value
+
+
 async def _business_group_context(bot: Bot, user_id: int) -> str:
     """What this person already knows from groups Aura was in with them.
 
@@ -5163,23 +5193,28 @@ async def _business_group_context(bot: Bot, user_id: int) -> str:
         logger.warning("Could not read the allowed groups", exc_info=True)
         return ""
     groups = [(int(row["chat_id"]), str(row["title"] or "")) for row in rows]
-    verified: list[tuple[int, str]] = []
-    for chat_id, title in groups:
-        cached = GROUP_MEMBERSHIP.get(chat_id, user_id)
-        if cached is None:
-            try:
-                member = await bot.get_chat_member(chat_id=chat_id, user_id=int(user_id))
-            except Exception as exc:
-                logger.info("Group membership check failed; treating as not a member | group=%s | %s",
-                            chat_id, type(exc).__name__)
-                continue
-            cached = group_memory.is_member_status(
-                str(getattr(member, "status", "") or ""),
-                restricted_is_member=bool(getattr(member, "is_member", False)),
-            )
-            GROUP_MEMBERSHIP.put(chat_id, user_id, cached)
-        if cached is True:
-            verified.append((chat_id, title))
+    # Quiet groups are dropped before anybody pays an API call for them, and the
+    # rest are capped: the checks for one message are a latency budget.
+    try:
+        shortlist = group_memory.candidates(
+            db, groups, limit=BUSINESS_GROUP_CONTEXT_CHECKS,
+        )
+    except Exception:
+        logger.warning("Could not shortlist the groups", exc_info=True)
+        return ""
+    if not shortlist:
+        return ""
+    # Asked together: ten serial round-trips are most of a second of delay on a
+    # reply, while ten at once cost the same as one (Telegram allows 30/s).
+    verdicts = await asyncio.gather(
+        *(_business_membership(bot, chat_id, user_id) for chat_id, _title in shortlist),
+        return_exceptions=True,
+    )
+    verified = [
+        (chat_id, title)
+        for (chat_id, title), verdict in zip(shortlist, verdicts)
+        if verdict is True
+    ]
     if not verified:
         return ""
     try:

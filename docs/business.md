@@ -115,6 +115,24 @@ message (speaker IDs, media placeholders) and keeps only `Name: what they said`,
 because a private reply should read like remembering, not like a transcript dump.
 Set `BUSINESS_GROUP_CONTEXT_ENABLED=false` to remove the section entirely.
 
+### What it costs
+
+Answering a stranger used to mean one `get_chat_member` round-trip per
+whitelisted group, one after another, before the model was even called: with ten
+groups and a realistic 80 ms round-trip, that is roughly 800 ms of pure waiting
+added to the first reply. Three changes cut it to about one round-trip:
+
+- **Quiet groups are dropped first.** A group with no stored message cannot
+  contribute anything, so it never costs an API call.
+- **The rest are ordered by activity and capped** at
+  `BUSINESS_GROUP_CONTEXT_CHECKS`, so the busiest groups are the ones checked.
+- **The checks run in parallel** (`asyncio.gather`), which Telegram's 30-calls-
+  per-second limit easily allows.
+
+The answers are still cached per person and group, so a second message in the
+same conversation asks for nothing at all. Measured on ten groups: 10 serial
+calls and ~800 ms before, 6 parallel calls and ~82 ms after.
+
 ## What Aura itself refuses
 
 Some messages are not answered, deliberately:
@@ -225,6 +243,7 @@ Telegram ──▶ business_connection ──▶ business_connection_handler ─
 | `BUSINESS_MAX_MESSAGE_AGE_SECONDS` | `180` | Older messages are ignored instead of answered late |
 | `BUSINESS_GROUP_CONTEXT_ENABLED` | `true` | Use shared-group context in a private reply |
 | `BUSINESS_GROUP_CONTEXT_GROUPS` | `3` | Most groups quoted in one reply |
+| `BUSINESS_GROUP_CONTEXT_CHECKS` | `6` | Most membership checks per message (busiest first, quiet groups skipped) |
 | `BUSINESS_GROUP_CONTEXT_MESSAGES` | `6` | Most lines taken from each group |
 | `BUSINESS_GROUP_CONTEXT_MAX_CHARS` | `1200` | Total size of the quoted block |
 | `BUSINESS_MEMBERSHIP_TTL_SECONDS` | `21600` | How long a verified membership is trusted |

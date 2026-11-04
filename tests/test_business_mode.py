@@ -1124,7 +1124,8 @@ def _group(bot, *, chat_id=-1001, title="فامیلی", member=True, messages=()
             (chat_id, content),
         )
     bot.db.commit()
-    bot.GROUP_MEMBERSHIP.put(chat_id, user_id, member)
+    if member is not None:
+        bot.GROUP_MEMBERSHIP.put(chat_id, user_id, bool(member))
     return chat_id
 
 
@@ -1164,8 +1165,8 @@ def test_a_group_the_person_is_not_in_is_never_quoted(isolated_bot):
 
 def test_membership_is_checked_with_telegram_and_cached(isolated_bot):
     bot, client = isolated_bot
-    bot.db.execute("INSERT OR REPLACE INTO allowed_groups (chat_id, title, added_at) VALUES (-1003, 'x', 0)")
-    bot.db.commit()
+    _group(bot, chat_id=-1003, title="x", member=None,
+           messages=[_stored_group_message("Sara", "سلام")])
     _grant(bot)
     calls = []
 
@@ -1317,3 +1318,111 @@ def test_a_data_wipe_removes_the_membership_cache():
     assert cache.drop_user(7) == 1
     assert cache.get(-1, 7) is None
     assert cache.get(-1, 8) is True
+
+
+# --- the cost of a reply: fewer checks, asked at once ---------------------
+
+def test_a_quiet_group_is_never_asked_about(isolated_bot):
+    """No stored message means nothing to quote, so the API call is wasted."""
+    bot, client = isolated_bot
+    _group(bot, chat_id=-1101, title="ساکت", member=None, messages=[])
+    _group(bot, chat_id=-1102, title="فعال", member=None,
+           messages=[_stored_group_message("Sara", "سلام")])
+    _grant(bot)
+    calls = []
+
+    async def get_chat_member(chat_id, user_id):
+        calls.append(chat_id)
+        return SimpleNamespace(status="member")
+
+    telegram = _telegram()
+    telegram.get_chat_member = get_chat_member
+    client.models.responses = [_text_response("باشه")]
+    _run_business(bot, _business_message(), telegram)
+    assert calls == [-1102]
+
+
+def test_the_busiest_group_is_checked_first(isolated_bot):
+    bot, _ = isolated_bot
+    _group(bot, chat_id=-1103, title="قدیمی", member=None,
+           messages=[_stored_group_message("Sara", "یک")])
+    _group(bot, chat_id=-1104, title="تازه", member=None,
+           messages=[_stored_group_message("Sara", "دو")])
+    # The quiet group now has the newest row, which is what "busiest" tracks.
+    bot.db.execute("INSERT INTO messages (user_id, role, content, created_at) VALUES (-1103, 'user', ?, 0)",
+                   (_stored_group_message("Sara", "سه"),))
+    bot.db.commit()
+    ordered = group_memory.candidates(bot.db, [(-1103, "قدیمی"), (-1104, "تازه")], limit=2)
+    # -1103 got the newest stored row, so it is tried first.
+    assert [chat_id for chat_id, _ in ordered] == [-1103, -1104]
+
+
+def test_the_number_of_checks_is_capped(isolated_bot, monkeypatch):
+    """A stranger's first message must not fan out over every group at once."""
+    bot, client = isolated_bot
+    monkeypatch.setattr(bot, "BUSINESS_GROUP_CONTEXT_CHECKS", 3)
+    for index in range(8):
+        _group(bot, chat_id=-1200 - index, title=f"g{index}", member=None,
+               messages=[_stored_group_message("Sara", f"پیام {index}")])
+    _grant(bot)
+    calls = []
+
+    async def get_chat_member(chat_id, user_id):
+        calls.append(chat_id)
+        return SimpleNamespace(status="left")
+
+    telegram = _telegram()
+    telegram.get_chat_member = get_chat_member
+    client.models.responses = [_text_response("باشه")]
+    _run_business(bot, _business_message(), telegram)
+    assert len(calls) == 3
+
+
+def test_membership_checks_are_asked_together_not_one_by_one(isolated_bot, monkeypatch):
+    """Ten serial round-trips are most of a second; ten at once cost one."""
+    bot, client = isolated_bot
+    monkeypatch.setattr(bot, "BUSINESS_GROUP_CONTEXT_CHECKS", 5)
+    for index in range(5):
+        _group(bot, chat_id=-1300 - index, title=f"g{index}", member=None,
+               messages=[_stored_group_message("Sara", f"پیام {index}")])
+    _grant(bot)
+    in_flight = {"now": 0, "max": 0}
+
+    async def get_chat_member(chat_id, user_id):
+        in_flight["now"] += 1
+        in_flight["max"] = max(in_flight["max"], in_flight["now"])
+        await asyncio.sleep(0.01)          # whatever a real round-trip costs
+        in_flight["now"] -= 1
+        return SimpleNamespace(status="member")
+
+    telegram = _telegram()
+    telegram.get_chat_member = get_chat_member
+    client.models.responses = [_text_response("باشه")]
+    _run_business(bot, _business_message(), telegram)
+    assert in_flight["max"] > 1, "checks ran one after another"
+
+
+def test_an_unknown_membership_is_distinct_from_a_no(isolated_bot):
+    """A failed check is not a fact, and must not be cached as one."""
+    bot, client = isolated_bot
+    _group(bot, chat_id=-1400, title="x", member=None,
+           messages=[_stored_group_message("Sara", "سلام")])
+    _grant(bot)
+
+    async def get_chat_member(chat_id, user_id):
+        raise RuntimeError("network")
+
+    telegram = _telegram()
+    telegram.get_chat_member = get_chat_member
+    verdict = asyncio.run(bot._business_membership(telegram, -1400, 555))
+    assert verdict is None
+    assert bot.GROUP_MEMBERSHIP.get(-1400, 555) is None
+
+
+def test_a_known_negative_answer_costs_no_api_call(isolated_bot):
+    bot, _ = isolated_bot
+    bot.GROUP_MEMBERSHIP.put(-1401, 555, False)
+    telegram = _telegram()
+    telegram.get_chat_member = AsyncMock()
+    assert asyncio.run(bot._business_membership(telegram, -1401, 555)) is False
+    telegram.get_chat_member.assert_not_awaited()

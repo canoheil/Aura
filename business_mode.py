@@ -82,6 +82,32 @@ class Connection:
 
 
 @dataclass(frozen=True)
+class Media:
+    """One attachment the person sent, already downloaded.
+
+    Opaque bytes plus the MIME type Telegram declared: this module never imports
+    Telegram, so this is what crosses that boundary.
+    """
+    data: bytes
+    mime_type: str
+    label: str = ""
+    hint: str = ""
+
+
+@dataclass(frozen=True)
+class Reply:
+    """What Aura decided to say, plus anything queued behind it.
+
+    ``sticker`` is a pack tag and ``images`` are the objects the picture tools
+    built; both are opaque here. The deployment sends them, because only it knows
+    how to address a business connection.
+    """
+    text: str
+    sticker: str = ""
+    images: tuple = ()
+
+
+@dataclass(frozen=True)
 class Incoming:
     """The fields of a ``business_message`` this module needs, and nothing else."""
 
@@ -94,6 +120,7 @@ class Incoming:
     from_is_bot: bool
     sender_business_bot_id: Optional[int]
     text: str
+    has_media: bool = False
 
 
 @dataclass(frozen=True)
@@ -141,7 +168,10 @@ def review(incoming: Incoming, connection: Optional[Connection], *,
     if answered:
         return _no("duplicate")
     text = (incoming.text or "").strip()
-    if not text or text.startswith("/"):
+    if text.startswith("/"):
+        return _no("no_text")
+    if not text and not incoming.has_media:
+        # A photo with no caption is a message; an empty update is not.
         return _no("no_text")
     if incoming.date and now - incoming.date > limits.max_message_age_seconds:
         # A restart can redeliver old updates; answering one an hour late is
@@ -448,6 +478,8 @@ def secretary_prompt(owner_name: str, *, customer_name: str = "", first_contact:
         "exist.\n"
         "- You are the same Aura as in the group chats: same voice, same humour, same knowledge. "
         "Do not switch into a stiffer assistant register just because this is a private message.\n"
+        "- You can see what they send: photos, stickers, GIFs (as a still frame) and voice messages. "
+        "Look at it and answer what it means, instead of asking them to describe it.\n"
         "- Answer what was asked and only that, in one to three short sentences. No headings, no "
         "lists, no signature, no decorative emoji, and no links they did not send.\n"
         "- Reply in the language they wrote in, and match their level of formality.\n"
@@ -495,7 +527,8 @@ class Secretary:
     def __init__(self, store: BusinessStore, *, compose: Callable[..., str],
                  send: Callable[..., bool], limits: Optional[Limits] = None,
                  bot_user_id: int = 0, allow_groups: bool = False,
-                 disclose_always: bool = False, clock: Optional[Callable[[], float]] = None):
+                 disclose_always: bool = False, clock: Optional[Callable[[], float]] = None,
+                 deliver: Optional[Callable[..., object]] = None):
         self.store = store
         self.compose = compose
         self.send = send
@@ -504,6 +537,10 @@ class Secretary:
         self.allow_groups = bool(allow_groups)
         self.disclose_always = bool(disclose_always)
         self.clock = clock or store.clock
+        # Optional: sends whatever a reply queued behind its text (a sticker, an
+        # image). Kept out of this module because addressing a business
+        # connection is Telegram's business, not the pipeline's.
+        self.deliver = deliver
 
     # --- requirements 1 & 2: the connection itself ---
     def on_connection(self, *, connection_id: str, owner_user_id: int, owner_chat_id: int,
@@ -579,7 +616,7 @@ class Secretary:
 
     # --- requirements 3, 4 & 5: the message and the answer ---
     async def handle(self, incoming: Incoming, *, owner_name: str = "",
-                     customer_name: str = "") -> str:
+                     customer_name: str = "", media: Optional[Media] = None) -> str:
         """Answer one business message. Returns a short reason for the log.
 
         Composition runs in a worker thread because it is a network call, and
@@ -607,13 +644,21 @@ class Secretary:
                                       first_contact=first_contact, disclose_always=self.disclose_always)
             customer_text = incoming.text.strip()
             owner_id = connection.owner_user_id
+            customer_chat_id = incoming.chat_id
             candidate = await asyncio.to_thread(
                 lambda: self.compose(transcript=transcript, text=customer_text,
-                                     owner_name=owner_name, prompt=prompt, owner_user_id=owner_id),
+                                     owner_name=owner_name, prompt=prompt, owner_user_id=owner_id,
+                                     media=media, chat_id=customer_chat_id),
             )
         except Exception:
             logger.warning("Business reply composition failed | chat=%s", incoming.chat_id, exc_info=True)
             return "compose_failed"
+        sticker, images = "", ()
+        if isinstance(candidate, Reply):
+            # A turn may queue media behind its words: one sticker, and any
+            # picture a tool generated. The text is still what gets validated.
+            sticker, images = candidate.sticker, tuple(candidate.images)
+            candidate = candidate.text
         reply = clean_reply(candidate, limit=self.limits.max_reply_chars, source_text=incoming.text)
         if not reply:
             # Silence is a valid answer: the owner can still reply by hand, and
@@ -632,10 +677,25 @@ class Secretary:
         if not sent:
             return "send_failed"
 
+        if self.deliver and (sticker or images):
+            try:
+                # After the text, and never allowed to break it: a sticker that
+                # Telegram rejects must not cost the answer.
+                delivered = self.deliver(incoming.connection_id, incoming.chat_id,
+                                         Reply(text=reply, sticker=sticker, images=images))
+                if inspect.isawaitable(delivered):
+                    await delivered
+            except Exception:
+                logger.warning("Business attachment delivery failed | chat=%s", incoming.chat_id,
+                               exc_info=True)
+
         owner = connection.owner_user_id
         self.store.remember_reply(incoming.connection_id, incoming.chat_id, incoming.message_id,
                                   owner_user_id=owner)
-        self.store.add_turn(incoming.connection_id, incoming.chat_id, "user", incoming.text,
+        # The transcript is read back to the model, so a photo with no caption is
+        # stored as the fact that a photo arrived.
+        stored_text = incoming.text.strip() or (media.label if media else "") or "[media]"
+        self.store.add_turn(incoming.connection_id, incoming.chat_id, "user", stored_text,
                             keep=self.limits.history_turns, owner_user_id=owner)
         self.store.add_turn(incoming.connection_id, incoming.chat_id, "assistant", reply,
                             keep=self.limits.history_turns, owner_user_id=owner)

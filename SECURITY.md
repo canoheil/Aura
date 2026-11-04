@@ -35,6 +35,13 @@ project, so please allow reasonable time before disclosing publicly.
   weather tools.
 - Denial of service that a single Telegram user can trigger (quota exhaustion,
   memory growth, unbounded queues).
+- **Answering on someone's behalf (secretary mode).** A message from a stranger
+  that makes Aura disclose the owner's data, run a tool it should not have,
+  claim to be the owner, or answer while the mode is switched off, the grant is
+  revoked, or the limits say no.
+- **Context crossing conversations.** Any way to make something said in a group
+  reach a chat it was not said in, to quote a group the person is not verified
+  to be a member of, or to see another person's private conversation with Aura.
 
 ## What is out of scope
 
@@ -43,6 +50,21 @@ project, so please allow reasonable time before disclosing publicly.
 - Model mistakes with no security impact (a wrong fact, a bad joke, rude tone).
 - Rate limits or outages of third-party providers.
 - Telegram account security and Gemini/You.com account security.
+
+## What is already defended, by design
+
+Worth reading before reporting, so a real finding is not buried under a known
+one. Each line is enforced in code and covered by a test:
+
+- **The model is never trusted for permissions.** Tools it may not use are
+  removed from both the declarations and the runner, so a hallucinated call is
+  refused rather than executed.
+- **Group access is a whitelist**, and a group message only reaches the model in
+  an allowed group with a trigger (mention, name, reply, or a direct message).
+- **Web, file and message content is framed as untrusted data**, never as
+  instructions, in every prompt that includes it.
+- **Secrets are not echoed back**: `/admin` shows a masked value, logs never
+  contain tokens, and provider errors are sanitised before they reach a chat.
 
 ## If a secret was exposed
 

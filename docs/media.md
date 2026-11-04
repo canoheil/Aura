@@ -170,6 +170,66 @@ discarded before its bytes are downloaded.
 Set `MEME_ALLOW_NSFW=true` to accept NSFW-tagged posts (spoilers stay blocked
 either way) and `MEME_ALLOWED_SUBREDDITS` to pin a whitelist.
 
+## Settings
+
+Every knob below has a working default; set one only to change it. The master
+switches (`POLLINATIONS_ENABLED`, `SVG_IMAGE_ENABLED`, `MEMES_ENABLED`,
+`STICKERS_ENABLED`) are in [Configuration](configuration.md#feature-switches).
+
+**Files and YouTube links**
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FILE_MAX_SIZE_MB` | `15` | Largest document downloaded for analysis |
+| `FILE_MAX_EXTRACTED_CHARS` | `60000` | Extracted text handed to the model, per file |
+| `FILE_TOOL_MAX_CALLS` | `2` | `file_analyze` calls per turn |
+
+**Stickers**
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `STICKER_CONFIG_PATH` | `stickers_config.json` | Pack description: tags and their meanings |
+| `STICKER_SET_NAME` | — | Override the Telegram set named in that file |
+| `STICKER_COOLDOWN_SECONDS` | `60` | Minimum gap between stickers in a private chat |
+| `STICKER_GROUP_COOLDOWN_SECONDS` | `120` | The same, in a group |
+| `STICKER_TOOL_MAX_CALLS` | `1` | Stickers queued per reply; only the first is sent |
+
+**Images (Pollinations)**
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `POLLINATIONS_IMAGE_MODEL` | `flux` | Text-to-image model |
+| `POLLINATIONS_IMAGE_FALLBACK_MODEL` | `seedream` | Tried when the first model fails |
+| `POLLINATIONS_EDIT_MODEL` | `kontext` | Image-to-image model for edits |
+| `POLLINATIONS_EDIT_FALLBACK_MODEL` | `nanobanana` | Fallback for edits |
+| `POLLINATIONS_IMAGE_WIDTH`, `POLLINATIONS_IMAGE_HEIGHT` | `1024` | Default canvas |
+| `POLLINATIONS_MAX_PROMPT_CHARS` | `1500` | Prompt is trimmed to this before sending (200–6000) |
+| `POLLINATIONS_TIMEOUT` | `180` | One generation may take this long (30–600 s) |
+| `POLLINATIONS_TOOL_MAX_CALLS` | `1` | Generations per turn |
+| `POLLINATIONS_UPLOAD_PRIVACY` | `true` | Strip EXIF/GPS before uploading an edit source |
+
+**Vector images**
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SVG_IMAGE_MAX_SIDE` | `1536` | Rendered PNG is capped to this side |
+| `SVG_IMAGE_MAX_OUTPUT_BYTES` | `8 MB` | Refuse a render larger than this (64 KB–10 MB) |
+| `SVG_IMAGE_BACKGROUND` | — | Background colour for transparent drawings (empty = transparent) |
+| `SVG_IMAGE_TOOL_MAX_CALLS` | `2` | Renders per turn |
+
+**Memes**
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MEME_API_BASE_URL` | `https://meme-api.com` | Primary service |
+| `MEME_API_FALLBACK_URL` | `https://meme-api.aelx.de` | Mirror, tried when the first fails |
+| `MEME_API_TIMEOUT` | `12` | Timeout for one HTTP request (3–60 s) |
+| `MEME_FETCH_BUDGET_SECONDS` | `20` | Deadline for the whole fetch, retries included (5–60) |
+| `MEME_MAX_BYTES` | `6 MB` | Largest image downloaded (256 KB–10 MB) |
+| `MEME_ALLOW_NSFW` | `false` | Accept NSFW-tagged posts (spoilers stay blocked) |
+| `MEME_ALLOWED_SUBREDDITS` | — | Pin the subreddits Aura may draw from |
+| `MEME_TOOL_MAX_CALLS` | `2` | Fetches per turn |
+
 ## Turning features off
 
 | Variable | Effect |

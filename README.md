@@ -62,6 +62,7 @@ message, and `/deletemydata` wipes a person's data in one transaction.
 | Retrieval | Guarded You.com web search with a freshness gate, page opening, weather from Open-Meteo (keyless) |
 | Media in | Photos, image documents, stickers, voice, audio, video, video notes, documents, YouTube links |
 | Media out | Photorealistic images via Pollinations (optional), vector images rendered locally from SVG, Reddit memes (keyless) |
+| Secretary mode | Answers the owner's Telegram Business account: customers get a short, honest assistant reply; no tools, no owner context, `/secretary` pause switch |
 | Reminders | One-shot and repeating reminders with per-user timezones, Persian clock words and Solar Hijri dates, snooze/done/skip/stop buttons, mention delivery in groups |
 | Groups | Whitelisted groups only, trigger words and mentions, speaker-aware replies, conservative sticker cooldowns |
 | Operations | `/admin` panel, health checks, versioned schema migrations, startup service scripts, per-user quotas |
@@ -114,6 +115,7 @@ reproducible environment.
 | `/image <prompt>` | Generate an image, or edit the photo you replied to |
 | `/remind <when> <task>` | Create a reminder, one-shot or repeating |
 | `/reminders`, `/cancelreminder <id>`, `/timezone` | Manage reminders and the per-user timezone |
+| `/secretary` | Secretary mode: status, `/secretary off`, `/secretary on`, `/secretary forget` |
 | `/language` | Switch between Persian and English |
 | `/usage` | Today's counter, the limits and when they reset |
 | `/deletemydata` | Preview, then delete everything stored about you |
@@ -134,6 +136,7 @@ Commands are not the only interface: ordinary sentences work too. „۱۰ دقی
 | [Media](docs/media.md) | Inbound photos/audio/video/stickers/files, image generation, SVG, memes |
 | [Search and retrieval](docs/search.md) | Freshness gate, evidence rules, cost bounds, weather |
 | [Reminders](docs/reminders.md) | Parsing, storage, delivery, edge cases |
+| [Secretary mode](docs/business.md) | Telegram Business: what customers get, the boundary, the owner's controls |
 | [Data and privacy](docs/data-and-privacy.md) | What is stored, `/deletemydata`, migrations, backups |
 | [Deployment](docs/deployment.md) | Running as a service, cPanel, concurrency, health checks, upgrades |
 | [Architecture](docs/architecture.md) | Module map, agent loop, prompt layers, design principles |
@@ -169,7 +172,7 @@ on Gemini or on a local Ollama model.
 | `settings_store.py`, `admin_panel.py` | Runtime settings, the `/admin` panel, audit trail |
 | `aura_identity.py`, `aura_personality_boundary.py`, `persona.py` | Who Aura is, and where style is allowed to change |
 | `freshness_policy.py`, `answer_quality.py` | When a search is mandatory, and what a trustworthy answer looks like |
-| `reminder_time.py`, `recurrence.py`, `reminders.py`, `memory_bridge.py`, `data_deletion.py` | Time and repeat parsing, durable state and its lifecycle |
+| `reminder_time.py`, `recurrence.py`, `reminders.py`, `business_mode.py`, `memory_bridge.py`, `data_deletion.py` | Time and repeat parsing, secretary mode, durable state and its lifecycle |
 | `telegram_formatting.py`, `i18n.py` | Copy-safe HTML and the Persian/English catalog |
 | `sticker_manager.py`, `sticker_vision.py`, `svg_image.py`, `pollinations_image.py`, `meme_api.py`, `weather_api.py` | Optional capabilities |
 

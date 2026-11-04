@@ -25,11 +25,12 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from telegram import Bot, ReactionTypeEmoji, Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, UpdateType
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
+    BusinessConnectionHandler,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -38,6 +39,7 @@ from telegram.ext import (
     filters,
 )
 
+import business_mode
 import data_deletion
 import freshness_policy
 import i18n
@@ -207,6 +209,16 @@ try:
     REMINDER_SNOOZE_SECONDS = max(60, min(24 * 3600, int(os.getenv("REMINDER_SNOOZE_MINUTES", "10")) * 60))
 except ValueError:
     REMINDER_SNOOZE_SECONDS = 600
+
+# Secretary mode: answering the owner's customers from their business account.
+BUSINESS_MODE_ENABLED = os.getenv("BUSINESS_MODE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+BUSINESS_ALLOW_GROUPS = os.getenv("BUSINESS_ALLOW_GROUPS", "false").strip().lower() in {"1", "true", "yes", "on"}
+# Saying "I am an AI assistant" unprompted is the honest default for a customer
+# who thinks they are writing to a person; it can be relaxed deliberately.
+BUSINESS_DISCLOSE_ALWAYS = os.getenv("BUSINESS_DISCLOSE_ALWAYS", "true").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+BUSINESS_LIMITS = business_mode.Limits.from_env(os.environ)
 
 # You.com Web Search settings
 YOU_API_KEY = os.getenv("YOU_API_KEY", "").strip()
@@ -834,6 +846,10 @@ logger.info("Database ready | %s", migrations.describe(db))
 # Additive reminder tables use the existing durable database, independently of
 # Aura's long-term memory subsystem.
 reminder_store = ReminderStore(db, db_lock, default_timezone=REMINDER_DEFAULT_TIMEZONE)
+
+# Secretary mode keeps its own tables: connections granted in BotFather,
+# per-customer transcripts and the reply bookkeeping that makes retries safe.
+business_store = business_mode.BusinessStore(db, db_lock)
 
 # Runtime settings (database overrides with env fallback) and who may edit them
 # from Telegram. Created here because both need the database connection.
@@ -4789,6 +4805,211 @@ async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await _answer_callback(query)
 
 
+# ---------- Secretary mode: the owner's business account ----------
+
+def _business_owner_name(connection) -> str:
+    """What a customer should see Aura call the account owner."""
+    configured = _clean_owner_name(SETTINGS.get("owner_name"))
+    if configured:
+        return configured
+    user = getattr(connection, "user", None) if connection is not None else None
+    name = " ".join(str(getattr(user, "first_name", "") or "").split())
+    return name[:64]
+
+
+def _business_compose(*, transcript: list[dict], text: str, owner_name: str,
+                      prompt: str, owner_user_id: int = 0) -> str:
+    """One model call, with no tools, no memory and no owner history.
+
+    Deliberately not `ask_model`: the agent path is built for the owner and
+    carries their context, tools and web access. A customer gets a plain,
+    bounded answer, and the provider interface is enough for that.
+    """
+    # The account owner's own model choice; a customer never picks it.
+    model = get_user_model(int(owner_user_id)) if owner_user_id else ""
+    messages = [*transcript, {"role": "user", "content": text}]
+    result = _ai_text(
+        model=model,
+        messages=messages,
+        system_instruction=prompt,
+        temperature=0.4,
+        # A customer-facing reply is short by design; the cap is a second guard.
+        max_output_tokens=400,
+        operation="business-reply",
+    )
+    return result.text or ""
+
+
+def _business_secretary(bot: Bot) -> "business_mode.Secretary":
+    """Build the pipeline around this bot instance's own send method."""
+
+    async def send(connection_id: str, chat_id: int, text: str) -> bool:
+        try:
+            await bot.send_message(chat_id=chat_id, text=text, business_connection_id=connection_id)
+            return True
+        except (Forbidden, BadRequest) as exc:
+            # A removed connection or a blocked chat is a permanent "no".
+            logger.warning("Business reply rejected | chat=%s | %s", chat_id, type(exc).__name__)
+            return False
+        except RetryAfter as exc:
+            logger.info("Business reply rate-limited | chat=%s | retry_after=%s", chat_id, exc.retry_after)
+            return False
+
+    return business_mode.Secretary(
+        business_store,
+        compose=_business_compose,
+        send=send,
+        limits=BUSINESS_LIMITS,
+        bot_user_id=int(getattr(bot, "id", 0) or 0),
+        allow_groups=BUSINESS_ALLOW_GROUPS,
+        disclose_always=BUSINESS_DISCLOSE_ALWAYS,
+    )
+
+
+async def business_connection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The owner connected, reconnected or disconnected the business account.
+
+    Nothing here trusts the message text: the connection is the authority, and
+    it arrives from Telegram. A disabled connection is dropped from the store,
+    so no later message can be answered through it.
+    """
+    connection = getattr(update, "business_connection", None)
+    if connection is None:
+        return
+    user = getattr(connection, "user", None)
+    owner_id = int(getattr(user, "id", 0) or 0)
+    if not owner_id:
+        return
+    rights = getattr(connection, "rights", None)
+    can_reply = bool(getattr(rights, "can_reply", True)) if rights is not None else True
+    can_read = bool(getattr(rights, "can_read", True)) if rights is not None else True
+    enabled = bool(getattr(connection, "is_enabled", False))
+    owner_chat_id = int(getattr(connection, "user_chat_id", owner_id) or owner_id)
+
+    _business_secretary(context.bot).on_connection(
+        connection_id=str(connection.id), owner_user_id=owner_id, owner_chat_id=owner_chat_id,
+        is_enabled=enabled, can_reply=can_reply, can_read=can_read,
+        owner_name=_business_owner_name(connection),
+    )
+    # Tell the owner in their own chat with Aura, so the switch is never silent.
+    key = "secretary.status.connected" if enabled else "secretary.status.disconnected"
+    try:
+        await context.bot.send_message(chat_id=owner_chat_id, text=_t(key, user_language(user_id=owner_id)))
+    except (Forbidden, BadRequest, RetryAfter) as exc:
+        logger.info("Could not tell the owner about the connection | %s", type(exc).__name__)
+
+
+def _business_incoming(message) -> "business_mode.Incoming":
+    sender = getattr(message, "from_user", None)
+    return business_mode.Incoming(
+        connection_id=str(getattr(message, "business_connection_id", "") or ""),
+        chat_id=int(message.chat_id),
+        chat_type=str(getattr(message.chat, "type", "") or ""),
+        message_id=int(message.message_id),
+        date=int(getattr(message, "date", None).timestamp()) if getattr(message, "date", None) else 0,
+        from_user_id=int(sender.id) if sender is not None else None,
+        from_is_bot=bool(getattr(sender, "is_bot", False)),
+        sender_business_bot_id=int(getattr(message, "sender_business_bot", None).id)
+        if getattr(message, "sender_business_bot", None) is not None else None,
+        text=str(getattr(message, "text", "") or ""),
+    )
+
+
+async def business_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A customer wrote to the owner's business account.
+
+    This handler owns business messages completely: it stops the pipeline here,
+    so the customer can never reach Aura's tools, memory or owner context.
+    """
+    message = getattr(update, "business_message", None)
+    if message is None:
+        edited = getattr(update, "edited_business_message", None)
+        if edited is not None:
+            # An edit is the customer changing their words after the fact.
+            # Answering it again would double-reply, and the owner may already
+            # have read the original; stay quiet, but stop the pipeline.
+            raise ApplicationHandlerStop
+        return
+    if not getattr(message, "chat", None) or not BUSINESS_MODE_ENABLED:
+        return
+    text = str(getattr(message, "text", "") or "").strip()
+    if not text:
+        # A photo or voice note gets no invention about its contents.
+        await _business_notice_unsupported(context, message)
+        raise ApplicationHandlerStop
+    sender = getattr(message, "from_user", None)
+    customer = " ".join(str(getattr(sender, "first_name", "") or "").split())[:60] if sender else ""
+    try:
+        await _business_secretary(context.bot).handle(
+            _business_incoming(message), customer_name=customer,
+        )
+    except Exception:
+        logger.warning("Business message could not be answered | chat=%s", message.chat_id, exc_info=True)
+    raise ApplicationHandlerStop
+
+
+async def _business_notice_unsupported(context: ContextTypes.DEFAULT_TYPE, message) -> None:
+    """For media: say plainly what Aura cannot do, instead of guessing."""
+    connection_id = str(getattr(message, "business_connection_id", "") or "")
+    if not connection_id:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=message.chat_id,
+            # The customer's own language is unknown; the deployment's chosen
+            # one is the best guess available, and better than silence.
+            text=_t("secretary.reply.media", user_language(user_id=None)),
+            business_connection_id=connection_id,
+        )
+    except (Forbidden, BadRequest, RetryAfter) as exc:
+        logger.info("Business media notice failed | %s", type(exc).__name__)
+
+
+async def secretary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner control for the business pipeline: status, on/off, forget.
+
+    The BotFather switch is the real permission; this is the everyday one, so a
+    busy morning or a private customer can be handled without leaving Telegram.
+    """
+    if not update.effective_user or not update.message:
+        return
+    lang = user_language(update)
+    if not ADMIN_ACCESS.allows(update.effective_user.id):
+        await _safe_reply_text(update, _t("secretary.denied", lang))
+        return
+    args = list(getattr(context, "args", None) or [])
+    action = args[0].lower() if args else ""
+
+    if action in {"on", "off"}:
+        paused = action == "off"
+        business_store.set_paused(paused, reason=f"by user {update.effective_user.id}")
+        await _safe_reply_text(update, _t(
+            "secretary.status.paused_on" if paused else "secretary.status.paused_off", lang))
+        return
+    if action == "forget":
+        removed = business_store.forget()
+        await _safe_reply_text(update, _t("secretary.status.forgotten", lang, count=removed))
+        return
+    if action:
+        await _safe_reply_text(update, _t("secretary.usage", lang))
+        return
+
+    connections = business_store.list(update.effective_user.id)
+    enabled = [c for c in connections if c.is_enabled]
+    paused = _t("secretary.status.paused_yes" if business_store.paused()
+                else "secretary.status.paused_no", lang)
+    lines = [_t("secretary.status.header", lang, enabled=len(enabled), paused=paused)]
+    if not connections:
+        lines.append(_t("secretary.status.no_connections", lang))
+    for connection in connections[:5]:
+        state = _t("secretary.status.active" if connection.is_enabled else "secretary.status.inactive", lang)
+        rights = _t("secretary.status.rights_ok", lang) if connection.can_reply else _t(
+            "secretary.status.rights_missing", lang)
+        lines.append(f"• {connection.owner_name or connection.owner_user_id} — {state} · {rights}")
+    lines.append(_t("secretary.usage", lang))
+    await _safe_reply_text(update, "\n".join(lines))
+
+
 async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message:
         return
@@ -5204,6 +5425,11 @@ async def group_access_guard(
     no reply, no reaction, no memory, no tools, no Gemini call.
     """
     if not isinstance(update, Update):
+        return
+    if getattr(update, "business_message", None) is not None or getattr(
+            update, "business_connection", None) is not None:
+        # A customer's chat belongs to the owner's business account, not to this
+        # deployment's group whitelist; the connection handler owns the decision.
         return
     chat = update.effective_chat
     if chat is None or chat.type not in {"group", "supergroup"}:
@@ -7403,12 +7629,28 @@ def build_application() -> Application:
     application.add_handler(
         CallbackQueryHandler(admin_panel_callback, pattern=r"^admin:")
     )
+    if BUSINESS_MODE_ENABLED:
+        # Telegram's own events for secretary mode. The connection handler
+        # records (or forgets) the granted connection; the message handler
+        # answers customers and stops the pipeline, so they never reach the
+        # ordinary message handler below.
+        application.add_handler(
+            BusinessConnectionHandler(business_connection_handler), group=-1
+        )
+        application.add_handler(
+            MessageHandler(filters.UpdateType.BUSINESS_MESSAGES, business_message_handler), group=-2
+        )
+        application.add_handler(CommandHandler("secretary", secretary_command))
     application.add_handler(
         MessageHandler(
             (
                 filters.TEXT | filters.PHOTO | filters.Document.ALL | filters.VOICE | filters.AUDIO
                 | filters.VIDEO | filters.VIDEO_NOTE | filters.ANIMATION | filters.Sticker.ALL
-            ) & ~filters.COMMAND,
+            ) & ~filters.COMMAND
+            # A customer's message — or their edit of one — is answered by the
+            # secretary pipeline above and must never be treated as a message
+            # to the owner's own Aura.
+            & ~filters.UpdateType.BUSINESS_MESSAGES,
             message_handler,
         )
     )
@@ -7417,6 +7659,27 @@ def build_application() -> Application:
     )
 
     return application
+
+
+def _allowed_updates() -> list:
+    """The update types to subscribe to.
+
+    `business_connection` and `business_message` are explicit rather than
+    implied by ALL_TYPES: polling must ask for them, and a webhook deployment
+    must pass the same list, or Telegram simply never delivers them.
+    """
+    updates = list(Update.ALL_TYPES)
+    if not BUSINESS_MODE_ENABLED:
+        business = {
+            UpdateType.BUSINESS_CONNECTION, UpdateType.BUSINESS_MESSAGE,
+            UpdateType.EDITED_BUSINESS_MESSAGE, UpdateType.DELETED_BUSINESS_MESSAGES,
+        }
+        updates = [item for item in updates if item not in business]
+    else:
+        for item in (UpdateType.BUSINESS_CONNECTION, UpdateType.BUSINESS_MESSAGE):
+            if item not in updates:
+                updates.append(item)
+    return updates
 
 
 def main() -> None:
@@ -7428,7 +7691,7 @@ def main() -> None:
 
     logger.info("Bot is running. Group replies require mention/name/reply; image vision enabled when the model accepts image input.")
     application.run_polling(
-        allowed_updates=Update.ALL_TYPES
+        allowed_updates=_allowed_updates()
     )
 
 

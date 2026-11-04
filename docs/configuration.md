@@ -171,9 +171,25 @@ the retry behaviour.
 | `SVG_IMAGE_ENABLED` | `true` | Vector images ([details](media.md#vector-images-svg)) |
 | `REACTION_AI_ENABLED` | `true` | Model-chosen reactions (Gemini only) |
 | `CONTEXT_MANAGER_ENABLED` | `true` | Rolling summaries |
+| `BUSINESS_MODE_ENABLED` | `true` | Secretary mode ([details](business.md)) |
+| `BUSINESS_ALLOW_GROUPS` | `false` | Answer business groups, not only private chats |
+| `BUSINESS_DISCLOSE_ALWAYS` | `true` | Say "AI assistant" unprompted to a new customer |
 
 Each switch removes both the tool and its prompt section, so Aura never
 advertises a capability she cannot use.
+
+Secretary mode has its own small budget, because it answers strangers rather
+than the owner:
+
+```bash
+BUSINESS_MIN_SECONDS_BETWEEN_REPLIES=2
+BUSINESS_MAX_REPLIES_PER_HOUR=30
+BUSINESS_MAX_REPLY_CHARS=900
+BUSINESS_HISTORY_TURNS=10
+BUSINESS_MAX_MESSAGE_AGE_SECONDS=180
+```
+
+Those only bound a customer's chat; they do not touch the owner's own usage.
 
 ## Per-user limits
 

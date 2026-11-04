@@ -95,6 +95,26 @@ otherwise happily pretend to be the business owner:
   assistant. With `BUSINESS_DISCLOSE_ALWAYS=true` (the default) it says so on its
   own in the first message of a conversation, before being asked.
 
+### What they already know from a group
+
+A friend writes privately and asks "what was the plan for Thursday?" Aura was in
+the group where it was decided, so she can answer without the owner. That is the
+one place where context crosses conversations, and it crosses in exactly one
+direction.
+
+| Rule | How it is enforced |
+| --- | --- |
+| The person must really be in the group | `get_chat_member` per candidate group, cached for `BUSINESS_MEMBERSHIP_TTL_SECONDS`; a failed check counts as **no** and is not cached |
+| Only groups Aura already serves | The candidates are the deployment's own allowed-groups list |
+| Bounded | At most `BUSINESS_GROUP_CONTEXT_GROUPS` groups, `BUSINESS_GROUP_CONTEXT_MESSAGES` lines each, `BUSINESS_GROUP_CONTEXT_MAX_CHARS` in total |
+| Quoted, not obeyed | The block is wrapped in `<shared_group_context>` and labelled as something *people* wrote, never as instructions |
+| One-way | `group_memory.py` has no write path at all: private text can never reach a group |
+
+The digest deliberately leaves out the metadata Aura stores with each group
+message (speaker IDs, media placeholders) and keeps only `Name: what they said`,
+because a private reply should read like remembering, not like a transcript dump.
+Set `BUSINESS_GROUP_CONTEXT_ENABLED=false` to remove the section entirely.
+
 ## What Aura itself refuses
 
 Some messages are not answered, deliberately:
@@ -203,6 +223,11 @@ Telegram ──▶ business_connection ──▶ business_connection_handler ─
 | `BUSINESS_MAX_REPLY_CHARS` | `900` | Longer replies are discarded, not truncated |
 | `BUSINESS_HISTORY_TURNS` | `10` | Exchanges kept per customer chat |
 | `BUSINESS_MAX_MESSAGE_AGE_SECONDS` | `180` | Older messages are ignored instead of answered late |
+| `BUSINESS_GROUP_CONTEXT_ENABLED` | `true` | Use shared-group context in a private reply |
+| `BUSINESS_GROUP_CONTEXT_GROUPS` | `3` | Most groups quoted in one reply |
+| `BUSINESS_GROUP_CONTEXT_MESSAGES` | `6` | Most lines taken from each group |
+| `BUSINESS_GROUP_CONTEXT_MAX_CHARS` | `1200` | Total size of the quoted block |
+| `BUSINESS_MEMBERSHIP_TTL_SECONDS` | `21600` | How long a verified membership is trusted |
 
 ## When nothing answers
 
@@ -229,5 +254,10 @@ The connection id is also readable in `/secretary` output and in the
 A customer's transcript is context, not an archive: only the last
 `BUSINESS_HISTORY_TURNS` exchanges are kept per chat, in `bot.db`, and
 `/secretary forget` erases them immediately. The owner can also delete everything
-with `/deletemydata`. No customer data leaves the deployment except in the model
-call that produces the reply.
+with `/deletemydata`, which also clears the cached `group_membership` rows — a
+membership is a fact about a person, so it is personal data too. No customer data
+leaves the deployment except in the model call that produces the reply.
+
+A private chat stays private in both directions: the group digest is read into
+that one conversation, and nothing written there is ever stored where a group
+could see it.

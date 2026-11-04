@@ -42,6 +42,7 @@ from telegram.ext import (
 import business_mode
 import data_deletion
 import freshness_policy
+import group_memory
 import i18n
 import migrations
 import persona
@@ -219,6 +220,21 @@ BUSINESS_DISCLOSE_ALWAYS = os.getenv("BUSINESS_DISCLOSE_ALWAYS", "true").strip()
     "1", "true", "yes", "on",
 }
 BUSINESS_LIMITS = business_mode.Limits.from_env(os.environ)
+# Letting Aura use what was said in a group the person is also in. Off by one
+# switch, because this is the only feature that reads across conversations.
+BUSINESS_GROUP_CONTEXT_ENABLED = os.getenv("BUSINESS_GROUP_CONTEXT_ENABLED", "true").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+try:
+    BUSINESS_GROUP_CONTEXT_GROUPS = max(1, min(10, int(os.getenv("BUSINESS_GROUP_CONTEXT_GROUPS", "3"))))
+    BUSINESS_GROUP_CONTEXT_MESSAGES = max(1, min(20, int(os.getenv("BUSINESS_GROUP_CONTEXT_MESSAGES", "6"))))
+    BUSINESS_GROUP_CONTEXT_MAX_CHARS = max(200, min(4000, int(os.getenv("BUSINESS_GROUP_CONTEXT_MAX_CHARS", "1200"))))
+    BUSINESS_MEMBERSHIP_TTL_SECONDS = max(60, int(os.getenv("BUSINESS_MEMBERSHIP_TTL_SECONDS", "21600")))
+except ValueError:
+    raise RuntimeError(
+        "BUSINESS_GROUP_CONTEXT_GROUPS, BUSINESS_GROUP_CONTEXT_MESSAGES, "
+        "BUSINESS_GROUP_CONTEXT_MAX_CHARS and BUSINESS_MEMBERSHIP_TTL_SECONDS must be integers."
+    ) from None
 # Handler groups. Each business event gets its own group because python-telegram-
 # bot runs at most one matching handler per group: sharing with the catch-all
 # access guard would leave the connection handler unreachable.
@@ -856,6 +872,12 @@ reminder_store = ReminderStore(db, db_lock, default_timezone=REMINDER_DEFAULT_TI
 # Secretary mode keeps its own tables: connections granted in BotFather,
 # per-customer transcripts and the reply bookkeeping that makes retries safe.
 business_store = business_mode.BusinessStore(db, db_lock)
+
+# Which groups a person was verified to be in. Telegram won't tell a bot the
+# list, so each candidate is checked and the answer cached; see group_memory.
+GROUP_MEMBERSHIP = group_memory.MembershipCache(
+    db, db_lock, ttl_seconds=BUSINESS_MEMBERSHIP_TTL_SECONDS,
+)
 
 # Runtime settings (database overrides with env fallback) and who may edit them
 # from Telegram. Created here because both need the database connection.
@@ -5125,6 +5147,54 @@ async def _business_download_media(
                                hint=hints.get(label, ""))
 
 
+async def _business_group_context(bot: Bot, user_id: int) -> str:
+    """What this person already knows from groups Aura was in with them.
+
+    Only groups in this deployment's whitelist are candidates, and only those
+    where Telegram confirms the person is a member. A `get_chat_member` failure
+    counts as "no": answering from a group someone may have left is exactly the
+    mistake this gate exists to prevent.
+    """
+    if not BUSINESS_GROUP_CONTEXT_ENABLED or not user_id:
+        return ""
+    try:
+        rows = get_allowed_groups()
+    except Exception:
+        logger.warning("Could not read the allowed groups", exc_info=True)
+        return ""
+    groups = [(int(row["chat_id"]), str(row["title"] or "")) for row in rows]
+    verified: list[tuple[int, str]] = []
+    for chat_id, title in groups:
+        cached = GROUP_MEMBERSHIP.get(chat_id, user_id)
+        if cached is None:
+            try:
+                member = await bot.get_chat_member(chat_id=chat_id, user_id=int(user_id))
+            except Exception as exc:
+                logger.info("Group membership check failed; treating as not a member | group=%s | %s",
+                            chat_id, type(exc).__name__)
+                continue
+            cached = group_memory.is_member_status(
+                str(getattr(member, "status", "") or ""),
+                restricted_is_member=bool(getattr(member, "is_member", False)),
+            )
+            GROUP_MEMBERSHIP.put(chat_id, user_id, cached)
+        if cached is True:
+            verified.append((chat_id, title))
+    if not verified:
+        return ""
+    try:
+        block = group_memory.digest(
+            db, groups=verified, membership=GROUP_MEMBERSHIP, user_id=int(user_id),
+            limit_groups=BUSINESS_GROUP_CONTEXT_GROUPS,
+            messages_per_group=BUSINESS_GROUP_CONTEXT_MESSAGES,
+            max_chars=BUSINESS_GROUP_CONTEXT_MAX_CHARS,
+        )
+    except Exception:
+        logger.warning("Could not build the group context", exc_info=True)
+        return ""
+    return group_memory.prompt_section(block)
+
+
 async def business_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """A customer wrote to the owner's business account.
 
@@ -5164,8 +5234,13 @@ async def business_message_handler(update: Update, context: ContextTypes.DEFAULT
     sender = getattr(message, "from_user", None)
     customer = " ".join(str(getattr(sender, "first_name", "") or "").split())[:60] if sender else ""
     try:
+        group_context = ""
+        sender_id = getattr(getattr(message, "from_user", None), "id", None)
+        if BUSINESS_GROUP_CONTEXT_ENABLED and isinstance(sender_id, int):
+            group_context = await _business_group_context(context.bot, sender_id)
         await _business_secretary(context.bot).handle(
             _business_incoming(message), customer_name=customer, media=media,
+            group_context=group_context,
         )
     except Exception:
         logger.warning("Business message could not be answered | chat=%s", message.chat_id, exc_info=True)

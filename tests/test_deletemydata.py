@@ -76,7 +76,7 @@ def test_every_personal_table_is_covered():
     keys = {category.key for category in CATEGORIES}
     assert keys == {
         "messages", "model", "summary", "video", "memories", "reminders", "timezone", "language",
-        "usage", "business", "business_chats", "business_replies",
+        "usage", "business", "business_chats", "business_replies", "group_membership",
     }
 
 

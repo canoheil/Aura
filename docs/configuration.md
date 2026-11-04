@@ -173,6 +173,7 @@ the retry behaviour.
 | `CONTEXT_MANAGER_ENABLED` | `true` | Rolling summaries |
 | `BUSINESS_MODE_ENABLED` | `true` | Secretary mode ([details](business.md)) |
 | `BUSINESS_ALLOW_GROUPS` | `false` | Answer business groups, not only private chats |
+| `BUSINESS_GROUP_CONTEXT_ENABLED` | `true` | Let a private reply use what was said in a group the person is verified to be in ([details](business.md)) |
 | `BUSINESS_DISCLOSE_ALWAYS` | `true` | Say "AI assistant" unprompted to a new customer |
 
 Each switch removes both the tool and its prompt section, so Aura never
@@ -187,9 +188,15 @@ BUSINESS_MAX_REPLIES_PER_HOUR=30
 BUSINESS_MAX_REPLY_CHARS=900
 BUSINESS_HISTORY_TURNS=10
 BUSINESS_MAX_MESSAGE_AGE_SECONDS=180
+BUSINESS_GROUP_CONTEXT_GROUPS=3
+BUSINESS_GROUP_CONTEXT_MESSAGES=6
+BUSINESS_GROUP_CONTEXT_MAX_CHARS=1200
+BUSINESS_MEMBERSHIP_TTL_SECONDS=21600
 ```
 
-Those only bound a customer's chat; they do not touch the owner's own usage.
+Those only bound a customer's chat; they do not touch the owner's own usage. The
+group-context caps are what keeps a reply from turning into an archive: at most
+three groups, six lines each, 1200 characters in total.
 
 ## Per-user limits
 

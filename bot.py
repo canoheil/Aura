@@ -4969,6 +4969,17 @@ async def _business_notice_unsupported(context: ContextTypes.DEFAULT_TYPE, messa
     connection_id = str(getattr(message, "business_connection_id", "") or "")
     if not connection_id:
         return
+    # Everything that silences a text reply silences this too: `/secretary off`,
+    # a removed grant, or a connection without the reply right. Answering a GIF
+    # while text is switched off is exactly the bug this guard exists for.
+    try:
+        allowed = _business_secretary(context.bot).may_notice(connection_id)
+    except Exception:
+        logger.warning("Business notice check failed | %s", connection_id, exc_info=True)
+        allowed = False
+    if not allowed:
+        logger.info("Business media notice skipped | connection=%s | reason=not_allowed", connection_id)
+        return
     try:
         await context.bot.send_message(
             chat_id=message.chat_id,

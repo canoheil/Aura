@@ -38,8 +38,11 @@ disappears from the command list, and only an environment change brings it back.
 
 ## What a customer gets
 
-A customer writes to the owner's account; Aura answers as the owner's assistant,
-in the customer's own language, from their own history with that business:
+A customer writes to the owner's account; Aura answers in their stead, in the
+customer's own language, from their own history with that account. It is the same
+Aura as in a group chat — same voice, same knowledge, same humour — rather than a
+stiffer "secretary" persona: someone writing privately should not feel they were
+handed to a different bot.
 
 ```text
 Customer: سلام، قیمت چاپ ۱۰۰ کارت ویزیت چنده؟
@@ -49,6 +52,10 @@ Aura:     سلام! قیمت دقیق را باید مدیرم اعلام کند
 Every reply is a **single short message**. No headings, no bullet lists, no
 signatures, no links unless the customer sent one, and no mention of other
 conversations.
+
+Saying "I can't see that" is still answering, so the notice sent for a photo or a
+file obeys **every** gate a text reply does: `/secretary off`, a revoked grant and
+a connection without the reply right all keep Aura silent, media included.
 
 ### The boundary, in the prompt itself
 

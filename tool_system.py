@@ -10,7 +10,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from google.genai import types
 
@@ -143,6 +143,21 @@ class ToolRegistry:
         self._tools[name] = ToolDefinition(
             name, declaration, handler, max_calls_per_run, bool(cache_results)
         )
+
+    def without(self, names: Iterable[str]) -> ToolRegistry:
+        """A view of this registry with some tools removed.
+
+        Shares the same ``ToolDefinition`` objects, so budgets and handlers are
+        identical; only what the model may see and call changes. Used to keep
+        the read/write tools of the owner out of a reply written for someone
+        else.
+        """
+        skip = {str(name) for name in names}
+        clone = ToolRegistry()
+        for name, tool in self._tools.items():
+            if name not in skip:
+                clone._tools[name] = tool
+        return clone
 
     def declarations(self) -> list[types.FunctionDeclaration]:
         return [tool.declaration for tool in self._tools.values()]

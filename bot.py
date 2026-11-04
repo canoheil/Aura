@@ -1184,7 +1184,8 @@ def conversation_key(update: Update) -> int:
 
 
 def build_system_prompt(update: Optional[Update] = None, *, chat_id: Optional[int] = None,
-                        user_id: Optional[int] = None, model: Optional[str] = None) -> str:
+                        user_id: Optional[int] = None, model: Optional[str] = None,
+                        allow_media_tools: bool = True) -> str:
     """Build Aura's shared prompt using verified Telegram/application identity.
 
     Scheduled messages have no incoming Update, so they supply the stored
@@ -1215,17 +1216,17 @@ def build_system_prompt(update: Optional[Update] = None, *, chat_id: Optional[in
 
     # Sticker guidance is dynamic: it disappears automatically when the pack
     # fails to load, so the model is never told about an unavailable tool.
-    if STICKERS_ENABLED and sticker_manager.is_ready():
+    if allow_media_tools and STICKERS_ENABLED and sticker_manager.is_ready():
         prompt += "\n\n" + _stickers_prompt_section()
 
     # Image guidance is dynamic too: it appears only when the Pollinations
     # client is configured, so Aura never advertises a tool she cannot use.
-    if pollinations_client.is_configured:
+    if allow_media_tools and pollinations_client.is_configured:
         prompt += "\n\n" + _image_generation_prompt_section()
 
     # Vector image authoring depends only on the local renderer, so it is
     # advertised independently of any external image service or quota.
-    if SVG_IMAGE_AVAILABLE:
+    if allow_media_tools and SVG_IMAGE_AVAILABLE:
         prompt += "\n\n" + _svg_image_prompt_section()
 
     # The date anchor is always present: without it the model has no way to
@@ -2846,6 +2847,12 @@ TOOL_REGISTRY = _create_tool_registry()
 AGENT_RUNNER = AgentRunner(TOOL_REGISTRY, max_rounds=AGENT_MAX_ROUNDS, max_tool_calls=AGENT_MAX_TOOL_CALLS)
 
 
+def _restricted_runner(exclude_tools: frozenset[str]) -> AgentRunner:
+    """A runner over the same tools minus ``exclude_tools``, same budgets."""
+    return AgentRunner(TOOL_REGISTRY.without(exclude_tools),
+                       max_rounds=AGENT_MAX_ROUNDS, max_tool_calls=AGENT_MAX_TOOL_CALLS)
+
+
 def _tool_response_payload(value: object) -> dict:
     if isinstance(value, dict):
         # Aura-private keys (image bytes, vision notes) start with "_" and must
@@ -2882,6 +2889,7 @@ def _agent_generation_config(
     require_web_search: bool = False,
     allow_meme_tool: bool = True,
     allow_file_tool: bool = False,
+    exclude_tools: frozenset[str] = frozenset(),
 ) -> types.GenerateContentConfig:
     """Build one agent-round config, optionally with a mandatory web search.
 
@@ -2896,6 +2904,11 @@ def _agent_generation_config(
     only for an active document; photos and other inline media do not need it.
     """
     declarations = TOOL_REGISTRY.declarations()
+    if exclude_tools:
+        # A tool the model cannot see cannot be called. This is how a reply
+        # written for someone other than the owner keeps the owner's memory and
+        # reminders out of reach, rather than asking the model nicely.
+        declarations = [item for item in declarations if item.name not in exclude_tools]
     if not allow_meme_tool:
         declarations = [item for item in declarations if item.name != "fetch_meme"]
     if not allow_file_tool:
@@ -2958,6 +2971,7 @@ def ask_model(
     allow_meme_tool: bool = True,
     current_user_text: Optional[str] = None,
     require_search_evidence: bool = False,
+    exclude_tools: frozenset[str] = frozenset(),
 ) -> tuple[str, Optional[dict], list[dict]]:
     """Run one agent turn with whichever provider is configured.
 
@@ -2985,15 +2999,20 @@ def ask_model(
             allow_meme_tool=allow_meme_tool,
             current_user_text=current_user_text,
             require_search_evidence=require_search_evidence,
+            exclude_tools=exclude_tools,
         )
 
     logger.info("Agent turn via %s | model=%s", config.name, config.model)
     try:
+        registry = TOOL_REGISTRY if not exclude_tools else TOOL_REGISTRY.without(exclude_tools)
+        runner = AGENT_RUNNER if not exclude_tools else AgentRunner(
+            registry, max_rounds=AGENT_MAX_ROUNDS, max_tool_calls=AGENT_MAX_TOOL_CALLS
+        )
         return providers.ask_agent(
             config,
             messages,
-            registry=TOOL_REGISTRY,
-            runner=AGENT_RUNNER,
+            registry=registry,
+            runner=runner,
             owner_user_id=owner_user_id,
             file_context=file_context,
             extra_context=extra_context,
@@ -3019,6 +3038,7 @@ def ask_gemini(
     current_user_text: Optional[str] = None,
     require_search_evidence: bool = False,
     lang: Optional[str] = None,
+    exclude_tools: frozenset[str] = frozenset(),
 ) -> tuple[str, Optional[dict], list[dict]]:
     """Run one bounded Aura agent task using Gemini function calling.
 
@@ -3054,7 +3074,9 @@ def ask_gemini(
         require_web_search=require_search,
         allow_meme_tool=allow_meme_tool,
         allow_file_tool=allow_file_tool,
+        exclude_tools=exclude_tools,
     )
+    runner = AGENT_RUNNER if not exclude_tools else _restricted_runner(exclude_tools)
 
     runtime_context = {"owner_user_id": owner_user_id} if owner_user_id else {}
     runtime_context["meme_allowed"] = bool(allow_meme_tool)
@@ -3273,7 +3295,7 @@ def ask_gemini(
                 state.events.append({"tool": name, "result": result})
                 logger.warning("Ignoring file_analyze call without an active document")
             else:
-                result = AGENT_RUNNER.execute_tool(state, name, args)
+                result = runner.execute_tool(state, name, args)
             if name == "schedule_reminder":
                 # The side effect may already have committed. Return the actual
                 # result immediately instead of risking a later model failure
@@ -4823,27 +4845,56 @@ def _business_owner_name(connection) -> str:
     return name[:64]
 
 
+# Tools that belong to the owner and must not be reachable from a message
+# written by someone else. Excluded from both the declaration list and the
+# runner, so an invented call is refused rather than executed.
+BUSINESS_PRIVATE_TOOLS = frozenset({
+    "memory_search", "memory_save", "memory_forget", "schedule_reminder",
+})
+# Tools whose whole point is to send something back into the chat. They arrive
+# with the outbound-media work; until then, advertising them would reserve a
+# sticker or render an image that nothing delivers.
+BUSINESS_OUTBOUND_TOOLS = frozenset({
+    "send_sticker", "generate_image", "create_svg_image", "fetch_meme",
+})
+BUSINESS_EXCLUDED_TOOLS = BUSINESS_PRIVATE_TOOLS | BUSINESS_OUTBOUND_TOOLS
+
+
 def _business_compose(*, transcript: list[dict], text: str, owner_name: str,
                       prompt: str, owner_user_id: int = 0) -> str:
-    """One model call, with no tools, no memory and no owner history.
+    """One full Aura turn, answering someone who wrote to the owner's account.
 
-    Deliberately not `ask_model`: the agent path is built for the owner and
-    carries their context, tools and web access. A customer gets a plain,
-    bounded answer, and the provider interface is enough for that.
+    This is the same engine as an ordinary chat: Aura's own system prompt,
+    personality, style guide, date anchor, search policy and tools. ``prompt`` is
+    the situational layer that says who is writing and that the owner is away —
+    it is appended, never substituted, so the voice does not change with the
+    inbox. What the owner keeps to themselves stays out of reach: the memory and
+    reminder tools are removed from the declarations *and* from the runner.
     """
-    # The account owner's own model choice; a customer never picks it.
-    model = get_user_model(int(owner_user_id)) if owner_user_id else ""
-    messages = [*transcript, {"role": "user", "content": text}]
-    result = _ai_text(
+    owner_id = int(owner_user_id or 0)
+    # The owner's own model choice; the person writing never picks it.
+    model = get_user_model(owner_id) if owner_id else ""
+    system_instruction = "\n\n".join(
+        part for part in (
+            build_system_prompt(user_id=owner_id, model=model, allow_media_tools=False),
+            prompt,
+        ) if part
+    )
+    messages = [
+        {"role": "system", "content": system_instruction},
+        *transcript,
+        {"role": "user", "content": text},
+    ]
+    answer, _meta, _events = ask_model(
         model=model,
         messages=messages,
-        system_instruction=prompt,
-        temperature=0.4,
-        # A customer-facing reply is short by design; the cap is a second guard.
-        max_output_tokens=400,
-        operation="business-reply",
+        owner_user_id=owner_id,
+        extra_context={"chat_id": 0, "user_id": owner_id, "is_group": False},
+        current_user_text=text,
+        allow_meme_tool=False,
+        exclude_tools=BUSINESS_EXCLUDED_TOOLS,
     )
-    return result.text or ""
+    return answer or ""
 
 
 def _business_secretary(bot: Bot) -> "business_mode.Secretary":

@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 import pytest
 from telegram import Update
 from telegram.ext import ApplicationHandlerStop, BusinessConnectionHandler, TypeHandler, filters
-from test_agent_tool_response import _text_response
+from test_agent_tool_response import _text_response, _tool_response
 from test_reminder_conversation import _update_with_text
 
 import migrations
@@ -790,3 +790,97 @@ def test_a_legacy_database_gains_the_connection_table():
     assert {"business_connections", "business_state", "business_messages", "business_replies"} <= tables
     columns = {row["name"] for row in db.execute("PRAGMA table_info(business_connections)")}
     assert {"id", "owner_user_id", "owner_chat_id", "is_enabled", "can_reply", "can_read"} <= columns
+
+
+# --- one Aura, one engine (phase B) ---------------------------------------
+#
+# The business reply used to be a second, smaller bot: its own prompt, its own
+# single model call, no vision, no tools. It now runs the same turn as an
+# ordinary chat, with the owner's private tools removed from the declarations
+# and from the runner.
+
+def _grant(bot):
+    asyncio.run(bot.business_connection_handler(_connection_update(), SimpleNamespace(bot=_telegram())))
+
+
+def _business_turn(bot, client, *, text="سلام، قیمت چنده؟", reply="سلام! در خدمتم."):
+    client.models.responses = [_text_response(reply)]
+    _grant(bot)
+    telegram = _telegram()
+    _run_business(bot, _business_message(text=text), telegram)
+    return telegram
+
+
+def test_a_business_reply_uses_auras_real_prompt_not_a_second_persona(isolated_bot):
+    bot, client = isolated_bot
+    _business_turn(bot, client)
+    _model, _contents, config = client.models.requests[0]
+    system = config.system_instruction
+    # Aura's own prompt, verbatim...
+    assert "You are Aura, an advanced personal AI assistant." in system
+    assert "Calm, intelligent, confident" in system
+    # ...with the situation appended, never substituted.
+    assert "covering for them until they are back" in system
+    assert "same Aura as in the group chats" in system
+
+
+def test_a_business_turn_gets_the_same_tools_minus_the_owners_private_ones(isolated_bot):
+    bot, client = isolated_bot
+    _business_turn(bot, client)
+    names = {declaration.name for declaration in client.models.requests[0][2].tools[0].function_declarations}
+    # Same abilities as any other chat — search included — minus exactly the
+    # owner's private tools and the ones that would send media (added later).
+    assert "web_search" in names and "web_open" in names
+    expected = set(bot.TOOL_REGISTRY.names()) - bot.BUSINESS_EXCLUDED_TOOLS - {"file_analyze"}
+    assert names == expected
+    assert not ({"memory_search", "memory_save", "memory_forget", "schedule_reminder"} & names)
+
+
+def test_a_hallucinated_private_tool_call_is_refused_not_executed(isolated_bot):
+    """Hiding a declaration is not enough; the runner must refuse it too."""
+    bot, _ = isolated_bot
+    runner = bot._restricted_runner(bot.BUSINESS_EXCLUDED_TOOLS)
+    state = bot.AgentRunState(runtime_context={"owner_user_id": OWNER_ID})
+    for name in sorted(bot.BUSINESS_PRIVATE_TOOLS):
+        result = runner.execute_tool(state, name, {"content": "anything", "query": "anything"})
+        assert result["ok"] is False
+        assert "Unknown tool" in result["error"]
+
+
+def test_the_customer_turn_carries_only_their_own_conversation(isolated_bot):
+    bot, client = isolated_bot
+    _business_turn(bot, client, text="فقط همین پیام")
+    contents = client.models.requests[0][1]
+    assert len(contents) == 1, "the owner's own history must not ride along"
+    assert contents[0].parts[-1].text == "فقط همین پیام"
+
+
+def test_a_business_turn_writes_nothing_into_the_owners_memory(isolated_bot):
+    bot, client = isolated_bot
+    _business_turn(bot, client, text="یادت باشه فردا ساعت ۹ زنگ بزنم")
+    rows = bot.db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    assert rows == 0
+    reminders = bot.db.execute("SELECT COUNT(*) FROM reminders").fetchone()[0]
+    assert reminders == 0
+
+
+def test_a_call_to_a_tool_it_does_not_have_is_refused_and_answered_around(isolated_bot):
+    """A hallucinated private call must not execute, and must not silence Aura."""
+    bot, client = isolated_bot
+    _grant(bot)
+    client.models.responses = [
+        _tool_response("memory_save", {"content": "چیزی که نباید ذخیره شود"}),
+        _text_response("سلام! در خدمتم."),
+    ]
+    telegram = _telegram()
+    _run_business(bot, _business_message(), telegram)
+    assert telegram.send_message.await_args.kwargs["text"] == "سلام! در خدمتم."
+    assert bot.db.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 0
+
+
+def test_the_prompt_does_not_advertise_media_it_cannot_send_yet(isolated_bot):
+    bot, client = isolated_bot
+    bot.STICKERS_ENABLED = True
+    _business_turn(bot, client)
+    system = client.models.requests[0][2].system_instruction
+    assert "send_sticker" not in system

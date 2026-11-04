@@ -168,6 +168,42 @@ def clean_stored_message(content: object) -> tuple[str, str]:
     return speaker, text
 
 
+def candidates(
+    db: sqlite3.Connection,
+    groups: Iterable[tuple[int, str]],
+    *,
+    limit: int = 6,
+) -> list[tuple[int, str]]:
+    """The groups worth checking, busiest first, and only those with content.
+
+    Two savings that matter more than they look:
+
+    * A group that has never produced a stored message cannot contribute to the
+      reply, so it is dropped *before* anyone pays an API call for it. A
+      deployment with thirty whitelisted groups and three active ones goes from
+      thirty checks to three.
+    * Ordering by the newest stored message means the cap in ``limit`` removes
+      quiet groups first, and the groups that survive are the ones most likely to
+      be what the person is writing about.
+    """
+    titles = {int(chat_id): str(title or "") for chat_id, title in groups}
+    if not titles:
+        return []
+    placeholders = ",".join("?" for _ in titles)
+    rows = db.execute(
+        f"""SELECT user_id AS chat_id, MAX(id) AS last_id
+            FROM messages WHERE user_id IN ({placeholders})
+            GROUP BY user_id ORDER BY last_id DESC""",
+        tuple(titles),
+    ).fetchall()
+    ordered = []
+    for row in rows:
+        chat_id = int(row["chat_id"] if hasattr(row, "keys") else row[0])
+        if chat_id in titles:
+            ordered.append((chat_id, titles[chat_id]))
+    return ordered[:max(1, int(limit))]
+
+
 def _recent_group_messages(db: sqlite3.Connection, chat_id: int, limit: int) -> list[str]:
     rows = db.execute(
         "SELECT content FROM messages WHERE user_id=? AND role='user' ORDER BY id DESC LIMIT ?",

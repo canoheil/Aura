@@ -189,6 +189,7 @@ BUSINESS_MAX_REPLY_CHARS=900
 BUSINESS_HISTORY_TURNS=10
 BUSINESS_MAX_MESSAGE_AGE_SECONDS=180
 BUSINESS_GROUP_CONTEXT_GROUPS=3
+BUSINESS_GROUP_CONTEXT_CHECKS=6
 BUSINESS_GROUP_CONTEXT_MESSAGES=6
 BUSINESS_GROUP_CONTEXT_MAX_CHARS=1200
 BUSINESS_MEMBERSHIP_TTL_SECONDS=21600
@@ -196,7 +197,11 @@ BUSINESS_MEMBERSHIP_TTL_SECONDS=21600
 
 Those only bound a customer's chat; they do not touch the owner's own usage. The
 group-context caps are what keeps a reply from turning into an archive: at most
-three groups, six lines each, 1200 characters in total.
+three groups, six lines each, 1200 characters in total. `BUSINESS_GROUP_CONTEXT_CHECKS`
+is a latency budget rather than a knowledge limit: a group with no stored
+messages is skipped before it costs an API call, the busiest groups are tried
+first, and the surviving checks are asked in parallel, so a stranger's first
+message pays for one round-trip instead of one per group.
 
 ## Per-user limits
 

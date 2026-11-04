@@ -219,6 +219,12 @@ BUSINESS_DISCLOSE_ALWAYS = os.getenv("BUSINESS_DISCLOSE_ALWAYS", "true").strip()
     "1", "true", "yes", "on",
 }
 BUSINESS_LIMITS = business_mode.Limits.from_env(os.environ)
+# Handler groups. Each business event gets its own group because python-telegram-
+# bot runs at most one matching handler per group: sharing with the catch-all
+# access guard would leave the connection handler unreachable.
+GROUP_BUSINESS_CONNECTION = -3
+GROUP_BUSINESS_MESSAGE = -2
+GROUP_ACCESS_GUARD = -1
 
 # You.com Web Search settings
 YOU_API_KEY = os.getenv("YOU_API_KEY", "").strip()
@@ -4875,7 +4881,17 @@ async def business_connection_handler(update: Update, context: ContextTypes.DEFA
     """
     connection = getattr(update, "business_connection", None)
     if connection is None:
+        # Registered as a BusinessConnectionHandler, so this is only a guard for
+        # a mis-registration; saying so beats a silent no-op.
+        logger.info("Business connection handler called without a connection | update=%s",
+                    type(update).__name__)
         return
+    logger.info(
+        "Business connection update | id=%s | enabled=%s | owner=%s",
+        getattr(connection, "id", "?"), getattr(connection, "is_enabled", "?"),
+        getattr(getattr(connection, "user", None), "id", "?"),
+    )
+    logger.debug("Business connection payload | %r", connection)
     user = getattr(connection, "user", None)
     owner_id = int(getattr(user, "id", 0) or 0)
     if not owner_id:
@@ -5165,6 +5181,11 @@ async def deletemydata_command(
         except Exception:
             logger.warning("Could not clear an in-memory context", exc_info=True)
     _bare_call_last.clear()
+    # The store keeps connections in memory; a wipe by SQL cannot invalidate it.
+    try:
+        business_store.clear_cache()
+    except Exception:
+        logger.warning("Could not clear the secretary-mode cache", exc_info=True)
 
     remaining = data_deletion.plan(db, user_id, lock=db_lock)
     logger.info(
@@ -7529,6 +7550,40 @@ def migrate_models_to_gemini() -> None:
         db.commit()
 
 
+def _business_connection_ids() -> list[str]:
+    """Every connection this deployment has ever been granted, newest first."""
+    try:
+        return [connection.id for connection in business_store.list()]
+    except Exception:
+        logger.warning("Could not read stored business connections", exc_info=True)
+        return []
+
+
+async def restore_business_connections(application: Application) -> dict[str, str]:
+    """Ask Telegram about stored connections, so a lost update is not fatal.
+
+    Telegram delivers ``business_connection`` exactly once. If that update
+    arrives while the bot is restarting — or before this feature was deployed —
+    the grant is in the database but this process never heard about it, and every
+    customer would be answered with silence. ``get_business_connection(id)`` is
+    the authority, so at startup each stored id is re-checked against it.
+    """
+    ids = _business_connection_ids()
+    if not ids:
+        logger.info("Secretary mode | no stored business connection to restore")
+        return {}
+    try:
+        outcome = await _business_secretary(application.bot).restore(application.bot.get_business_connection)
+    except Exception:
+        logger.warning("Secretary mode recovery failed", exc_info=True)
+        return {}
+    logger.info(
+        "Secretary mode | %s connection(s) checked | %s",
+        len(outcome), ", ".join(f"{key}={value}" for key, value in outcome.items()),
+    )
+    return outcome
+
+
 async def application_post_init(application: Application) -> None:
     """Start durable reminder delivery and load the optional sticker pack."""
     existing = application.bot_data.get("reminder_task")
@@ -7544,6 +7599,9 @@ async def application_post_init(application: Application) -> None:
     application.bot_data["reminder_scheduler"] = scheduler
     application.bot_data["reminder_task"] = asyncio.create_task(scheduler.run(), name="reminder-scheduler")
     await load_sticker_registry(application)
+    if BUSINESS_MODE_ENABLED:
+        # After the bot is initialised, so the API call is legal here.
+        await restore_business_connections(application)
 
 
 async def stop_reminder_scheduler(application: Application) -> None:
@@ -7572,10 +7630,20 @@ def build_application() -> Application:
         .build()
     )
 
+    # Handler groups, in the order python-telegram-bot runs them. Within one
+    # group **only the first matching handler runs**, so a catch-all handler
+    # shares a group with nothing: the access guard below matches every Update,
+    # and anything registered beside it would be silently dead code.
+    #
+    #   -3  business connections   (secretary mode; see the note there)
+    #   -2  business messages      (customers; stops the pipeline)
+    #   -1  group access guard     (the catch-all)
+    #    0  commands, callbacks and the ordinary message handler
+    #
     # Access control runs first (group -1): updates from non-whitelisted
     # groups are dropped before any command or message handler can react.
     application.add_handler(
-        TypeHandler(Update, group_access_guard), group=-1
+        TypeHandler(Update, group_access_guard), group=GROUP_ACCESS_GUARD
     )
 
     application.add_handler(
@@ -7634,11 +7702,15 @@ def build_application() -> Application:
         # records (or forgets) the granted connection; the message handler
         # answers customers and stops the pipeline, so they never reach the
         # ordinary message handler below.
+        # Its own group, never the guard's: a `business_connection` update used
+        # to be swallowed by the catch-all `TypeHandler(Update, …)` registered
+        # first in group -1, so Telegram sent it and Aura never saw it.
         application.add_handler(
-            BusinessConnectionHandler(business_connection_handler), group=-1
+            BusinessConnectionHandler(business_connection_handler), group=GROUP_BUSINESS_CONNECTION
         )
         application.add_handler(
-            MessageHandler(filters.UpdateType.BUSINESS_MESSAGES, business_message_handler), group=-2
+            MessageHandler(filters.UpdateType.BUSINESS_MESSAGES, business_message_handler),
+            group=GROUP_BUSINESS_MESSAGE,
         )
         application.add_handler(CommandHandler("secretary", secretary_command))
     application.add_handler(
@@ -7682,6 +7754,21 @@ def _allowed_updates() -> list:
     return updates
 
 
+def _polling_kwargs() -> dict:
+    """How to poll. Factored out so a test can assert it, not just eyeball it.
+
+    ``drop_pending_updates=False`` is explicit rather than implied: Telegram
+    holds updates for 24 hours, and a ``business_connection`` that arrives while
+    the bot is restarting is the *only* notification of that grant. Dropping the
+    queue on start would throw it away and leave secretary mode silent until the
+    owner reconnects by hand.
+    """
+    return {
+        "allowed_updates": _allowed_updates(),
+        "drop_pending_updates": False,
+    }
+
+
 def main() -> None:
     logger.info("Starting %s...", BOT_NAME)
     migrate_models_to_gemini()
@@ -7690,9 +7777,7 @@ def main() -> None:
     application = build_application()
 
     logger.info("Bot is running. Group replies require mention/name/reply; image vision enabled when the model accepts image input.")
-    application.run_polling(
-        allowed_updates=_allowed_updates()
-    )
+    application.run_polling(**_polling_kwargs())
 
 
 if __name__ == "__main__":

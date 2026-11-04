@@ -14,14 +14,15 @@ answer a message.
 | Reminders, reminder timezone | user + chat | Delivering the reminder |
 | Language choice | user | Answering in the right language |
 | Usage counters (`user_usage`) | user + UTC day | Optional per-user quotas |
+| Secretary-mode connection, customer transcripts | account owner + customer chat | Answering a business account's messages ([details](business.md)) |
 | Allowed groups | chat | Group access control |
 | Settings and their audit trail | — | `/admin` |
 | Sticker cache | — | Fallback when Telegram's pack listing fails |
 | Web caches | query | Avoiding duplicate paid calls |
 
-Conversation history, memory and reminders can be deleted by the person they
-belong to; the web caches, settings and the group whitelist are shared state and
-are deliberately not part of that.
+Conversation history, memory, reminders and the secretary-mode rows can be
+deleted by the person they belong to; the web caches, settings, the pause switch
+and the group whitelist are shared state and are deliberately not part of that.
 
 ## `/deletemydata`
 

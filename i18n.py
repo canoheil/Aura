@@ -84,6 +84,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "/language — تغییر زبان\n"
             "/deletemydata — دیدن و پاک کردن همهٔ داده‌های شخصی\n"
             "/usage — مصرف امروز و سهمیهٔ باقی‌مانده\n"
+            "/secretary — حالت منشی برای حساب کاری (فقط مدیر)\n"
             "/whoami — نمایش Telegram ID و وضعیت سازنده"
         ),
         "en": (
@@ -109,6 +110,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "/language — change the language\n"
             "/deletemydata — see and delete everything stored about you\n"
             "/usage — today's usage and remaining allowance\n"
+            "/secretary — secretary mode for a business account (admins)\n"
             "/whoami — show your Telegram ID and founder status"
         ),
     },
@@ -246,6 +248,60 @@ CATALOG: dict[str, dict[str, str]] = {
     "settings.cmd_add": {"fa": "/settings add <chat_id> — افزودن گروه", "en": "/settings add <chat_id> — add a group"},
     "settings.cmd_remove": {"fa": "/settings remove <chat_id> — حذف گروه", "en": "/settings remove <chat_id> — remove a group"},
     # --- reminders ---------------------------------------------------------
+    # --- secretary mode (Telegram Business) ---------------------------------
+    "secretary.status.connected": {
+        "fa": "📇 حالت منشی روشن شد؛ از این به بعد پیام‌های حساب کاری‌ات را جواب می‌دهم. "
+              "برای خاموش کردن: /secretary off",
+        "en": "📇 Secretary mode is on; I'll answer the messages that come to your business "
+              "account. To pause me: /secretary off",
+    },
+    "secretary.status.disconnected": {
+        "fa": "📇 اتصال حالت منشی قطع شد؛ دیگر به پیام‌های حساب کاری جواب نمی‌دهم.",
+        "en": "📇 The secretary-mode connection is gone; I'll no longer answer that business account.",
+    },
+    "secretary.denied": {
+        "fa": "این دستور مال سازنده یا مدیرهای ربات است.",
+        "en": "Only the founder or an admin can use this command.",
+    },
+    "secretary.usage": {
+        "fa": "استفاده: /secretary برای وضعیت · /secretary off برای توقف · "
+              "/secretary on برای شروع دوباره · /secretary forget برای پاک کردن گفتگوهای مشتریان",
+        "en": "Usage: /secretary for status · /secretary off to pause · /secretary on to resume · "
+              "/secretary forget to erase the stored customer conversations",
+    },
+    "secretary.status.header": {
+        "fa": "📇 حالت منشی — {enabled} اتصال فعال، {paused}",
+        "en": "📇 Secretary mode — {enabled} active connection(s), {paused}",
+    },
+    "secretary.status.paused_yes": {"fa": "موقتاً متوقف", "en": "paused"},
+    "secretary.status.paused_no": {"fa": "در حال کار", "en": "running"},
+    "secretary.status.no_connections": {
+        "fa": "هیچ اتصالی ثبت نشده؛ در BotFather بخش Business Mode را روشن کن و دوباره وصل شو.",
+        "en": "No connection is stored yet; turn on Business Mode in BotFather and reconnect.",
+    },
+    "secretary.status.active": {"fa": "فعال", "en": "active"},
+    "secretary.status.inactive": {"fa": "غیرفعال", "en": "inactive"},
+    "secretary.status.rights_ok": {"fa": "اجازهٔ پاسخ دارد", "en": "can reply"},
+    "secretary.status.rights_missing": {
+        "fa": "اجازهٔ پاسخ ندارد؛ در تنظیمات Business Mode فعالش کن",
+        "en": "cannot reply; enable replying in Business Mode",
+    },
+    "secretary.status.paused_on": {
+        "fa": "⏸ حالت منشی متوقف شد؛ تا /secretary on هیچ پیام مشتری‌ای را جواب نمی‌دهم.",
+        "en": "⏸ Secretary mode paused; until /secretary on I won't answer any customer.",
+    },
+    "secretary.status.paused_off": {
+        "fa": "▶️ حالت منشی دوباره روشن شد.",
+        "en": "▶️ Secretary mode is running again.",
+    },
+    "secretary.status.forgotten": {
+        "fa": "🧹 {count} ردیف از گفتگوهای مشتریان پاک شد.",
+        "en": "🧹 Erased {count} stored row(s) from the customer conversations.",
+    },
+    "secretary.reply.media": {
+        "fa": "الان فقط پیام متنی را می‌توانم بخوانم؛ عکسی که فرستادید را برای مدیرتان نگه می‌دارم.",
+        "en": "I can only read text messages right now; I'll keep the file you sent for the owner.",
+    },
     "remind.usage": {
         "fa": (
             "زمان و متن یادآوری را بفرست؛ مثلاً:\n"
@@ -832,6 +888,18 @@ CATALOG: dict[str, dict[str, str]] = {
     "deletemydata.item.usage": {
         "fa": "• شمارندهٔ مصرف: {count}",
         "en": "• Usage counter: {count}",
+    },
+    "deletemydata.item.business": {
+        "fa": "اتصال حالت منشی",
+        "en": "secretary-mode connection",
+    },
+    "deletemydata.item.business_chats": {
+        "fa": "گفتگوهای مشتریان در حالت منشی",
+        "en": "customer conversations in secretary mode",
+    },
+    "deletemydata.item.business_replies": {
+        "fa": "پاسخ‌های ارسال‌شده در حالت منشی",
+        "en": "replies sent in secretary mode",
     },
     "deletemydata.item.language": {
         "fa": "• زبان انتخابی: {count}",

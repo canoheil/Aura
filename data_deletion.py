@@ -56,6 +56,12 @@ CATEGORIES: tuple[Category, ...] = (
     Category("timezone", "reminder_timezones", "user_id"),
     Category("language", "user_language", "user_id"),
     Category("usage", "user_usage", "user_id"),
+    # Secretary mode: the connection the owner granted, what customers wrote to
+    # them, and which messages were answered. The pause switch is deployment
+    # state, not personal data, and stays.
+    Category("business", "business_connections", "owner_user_id"),
+    Category("business_chats", "business_messages", "owner_user_id"),
+    Category("business_replies", "business_replies", "owner_user_id"),
 )
 
 

@@ -443,7 +443,7 @@ def _connection(row) -> Connection:
 # --- speaking ---------------------------------------------------------------
 
 def secretary_prompt(owner_name: str, *, customer_name: str = "", first_contact: bool = False,
-                     disclose_always: bool = False) -> str:
+                     disclose_always: bool = False, group_context: str = "") -> str:
     """The situational layer for a message that arrives while the owner is away.
 
     Appended to Aura's ordinary system prompt rather than replacing it: the
@@ -488,6 +488,7 @@ def secretary_prompt(owner_name: str, *, customer_name: str = "", first_contact:
         "is all there is, say politely that you cannot help with it.\n"
         "- If the message is unclear, ask one short question instead of guessing."
         + disclosure
+        + (("\n\n" + group_context.strip()) if group_context.strip() else "")
     )
 
 
@@ -616,7 +617,8 @@ class Secretary:
 
     # --- requirements 3, 4 & 5: the message and the answer ---
     async def handle(self, incoming: Incoming, *, owner_name: str = "",
-                     customer_name: str = "", media: Optional[Media] = None) -> str:
+                     customer_name: str = "", media: Optional[Media] = None,
+                     group_context: str = "") -> str:
         """Answer one business message. Returns a short reason for the log.
 
         Composition runs in a worker thread because it is a network call, and
@@ -641,7 +643,8 @@ class Secretary:
         owner_name = (owner_name or connection.owner_name or "").strip()
         try:
             prompt = secretary_prompt(owner_name, customer_name=customer_name,
-                                      first_contact=first_contact, disclose_always=self.disclose_always)
+                                      first_contact=first_contact, disclose_always=self.disclose_always,
+                                      group_context=group_context)
             customer_text = incoming.text.strip()
             owner_id = connection.owner_user_id
             customer_chat_id = incoming.chat_id

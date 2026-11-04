@@ -62,6 +62,9 @@ CATEGORIES: tuple[Category, ...] = (
     Category("business", "business_connections", "owner_user_id"),
     Category("business_chats", "business_messages", "owner_user_id"),
     Category("business_replies", "business_replies", "owner_user_id"),
+    # Which groups this person was verified to be in, cached by secretary mode to
+    # avoid an API call per message. It is a fact about them, so it goes too.
+    Category("group_membership", "group_membership", "user_id"),
 )
 
 

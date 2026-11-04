@@ -156,6 +156,22 @@ def ensure_business_tables(db: sqlite3.Connection) -> None:
                " ON business_replies(connection_id, chat_id, replied_at)")
 
 
+def ensure_group_membership_table(db: sqlite3.Connection) -> None:
+    """Create the cache of verified group memberships.
+
+    ``MembershipCache`` also creates it on construction; the migration exists so
+    an upgraded ``bot.db`` gains the table even before the first private message
+    arrives, and so the schema has a version to attach a later change to.
+    """
+    db.execute("""CREATE TABLE IF NOT EXISTS group_membership (
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        is_member INTEGER NOT NULL,
+        checked_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, user_id)
+    )""")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -171,6 +187,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=3,
         name="secretary-mode",
         apply=ensure_business_tables,
+    ),
+    Migration(
+        version=4,
+        name="group-membership",
+        apply=ensure_group_membership_table,
     ),
 )
 

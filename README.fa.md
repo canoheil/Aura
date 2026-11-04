@@ -170,7 +170,7 @@ Telegram ─▶ handler ─▶ prompt layers ─▶ agent loop ─▶ tool regis
 | `settings_store.py`، `admin_panel.py` | تنظیمات زمان اجرا، پنل `/admin`، تاریخچه |
 | `aura_identity.py`، `aura_personality_boundary.py`، `persona.py` | کیستی آورا و جایی که سبک مجاز است تغییر کند |
 | `freshness_policy.py`، `answer_quality.py` | چه‌وقت جستجو اجباری است و پاسخ معتبر چه شکلی است |
-| `reminder_time.py`، `recurrence.py`، `reminders.py`، `business_mode.py`، `memory_bridge.py`، `data_deletion.py` | تجزیهٔ زمان و تکرار، حالت منشی، وضعیت پایدار و چرخهٔ عمرش |
+| `reminder_time.py`، `recurrence.py`، `reminders.py`، `business_mode.py`، `group_memory.py`، `memory_bridge.py`، `data_deletion.py` | تجزیهٔ زمان و تکرار، حالت منشی، بافت گروه‌های مشترک، وضعیت پایدار و چرخهٔ عمرش |
 | `telegram_formatting.py`، `i18n.py` | HTML کپی‌سالم و کاتالوگ فارسی/انگلیسی |
 | `sticker_manager.py`، `sticker_vision.py`، `svg_image.py`، `pollinations_image.py`، `meme_api.py`، `weather_api.py` | قابلیت‌های اختیاری |
 

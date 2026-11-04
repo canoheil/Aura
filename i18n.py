@@ -897,6 +897,10 @@ CATALOG: dict[str, dict[str, str]] = {
         "fa": "گفتگوهای مشتریان در حالت منشی",
         "en": "customer conversations in secretary mode",
     },
+    "deletemydata.item.group_membership": {
+        "fa": "گروه‌هایی که عضو بودنش تأیید شده",
+        "en": "verified group memberships",
+    },
     "deletemydata.item.business_replies": {
         "fa": "پاسخ‌های ارسال‌شده در حالت منشی",
         "en": "replies sent in secretary mode",

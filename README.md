@@ -172,7 +172,7 @@ on Gemini or on a local Ollama model.
 | `settings_store.py`, `admin_panel.py` | Runtime settings, the `/admin` panel, audit trail |
 | `aura_identity.py`, `aura_personality_boundary.py`, `persona.py` | Who Aura is, and where style is allowed to change |
 | `freshness_policy.py`, `answer_quality.py` | When a search is mandatory, and what a trustworthy answer looks like |
-| `reminder_time.py`, `recurrence.py`, `reminders.py`, `business_mode.py`, `memory_bridge.py`, `data_deletion.py` | Time and repeat parsing, secretary mode, durable state and its lifecycle |
+| `reminder_time.py`, `recurrence.py`, `reminders.py`, `business_mode.py`, `group_memory.py`, `memory_bridge.py`, `data_deletion.py` | Time and repeat parsing, secretary mode, shared-group context, durable state and its lifecycle |
 | `telegram_formatting.py`, `i18n.py` | Copy-safe HTML and the Persian/English catalog |
 | `sticker_manager.py`, `sticker_vision.py`, `svg_image.py`, `pollinations_image.py`, `meme_api.py`, `weather_api.py` | Optional capabilities |
 

@@ -15,14 +15,17 @@ answer a message.
 | Language choice | user | Answering in the right language |
 | Usage counters (`user_usage`) | user + UTC day | Optional per-user quotas |
 | Secretary-mode connection, customer transcripts | account owner + customer chat | Answering a business account's messages ([details](business.md)) |
+| Verified group memberships (`group_membership`) | user + group | Knowing whether a group may be quoted in a private reply ([details](business.md#what-they-already-know-from-a-group)) |
 | Allowed groups | chat | Group access control |
 | Settings and their audit trail | — | `/admin` |
 | Sticker cache | — | Fallback when Telegram's pack listing fails |
 | Web caches | query | Avoiding duplicate paid calls |
 
-Conversation history, memory, reminders and the secretary-mode rows can be
-deleted by the person they belong to; the web caches, settings, the pause switch
-and the group whitelist are shared state and are deliberately not part of that.
+Conversation history, memory, reminders, the secretary-mode rows and the cached
+group memberships can be deleted by the person they belong to; the web caches,
+settings, the pause switch and the group whitelist are shared state and are
+deliberately not part of that. A membership answer is a fact about a person, so
+it is treated as their data rather than as a property of the group.
 
 ## `/deletemydata`
 
@@ -76,7 +79,7 @@ sqlite3 bot.db 'SELECT * FROM schema_migrations'
   counter untouched, so a crash mid-upgrade can simply be retried.
 - A database written by a **newer** release is refused at startup instead of
   being served by older code. `health_check.check_database()` reports the same
-  state (`schema v2/3 (current)`) and flags that case as unhealthy.
+  state (`schema v4/4 (current)`) and flags that case as unhealthy.
 - Downgrading is not supported: restore the `bot.db` backup you took before the
   upgrade, or upgrade the code again.
 

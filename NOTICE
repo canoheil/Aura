@@ -16,20 +16,33 @@ Third-party components distributed with this repository
 Third-party dependencies
 ------------------------
 
-Python packages listed in requirements.txt / requirements-pinned.txt are not
-vendored into this repository; they are installed by the user and remain under
-their own licenses. Notable runtime services are used over their public APIs
-and are governed by the terms of the account holder:
+The Python packages listed in requirements.txt / requirements-pinned.txt are not
+vendored into this repository: they are installed by whoever runs Aura and remain
+under their own licenses. The runtime set is:
 
 - python-telegram-bot (LGPL-3.0)   https://python-telegram-bot.org
 - google-genai (Apache-2.0)        https://github.com/googleapis/python-genai
 - requests (Apache-2.0)            https://requests.readthedocs.io
+- cryptography (Apache-2.0 OR BSD-3-Clause)  https://cryptography.io
+- python-dotenv (BSD-3-Clause)     https://github.com/theskumar/python-dotenv
 - pypdf (BSD-3-Clause)             https://pypdf.readthedocs.io
 - python-docx (MIT)                https://python-docx.readthedocs.io
 - openpyxl (MIT)                   https://openpyxl.readthedocs.io
 - python-pptx (MIT)                https://python-pptx.readthedocs.io
 - resvg-py (MPL-2.0 wrapper of resvg, MPL-2.0)  https://github.com/baseplate-admin/resvg-py
 - tzdata (Apache-2.0)              https://pypi.org/project/tzdata
+
+The test suite adds pytest, ruff, pre-commit and their dependencies; see
+requirements-dev.txt. None of them ship with the application.
+
+Sticker pack
+------------
+
+`stickers_config.json` names a sticker set that lives on Telegram
+(`sYMA1791362612_by_stickwebot`). No sticker image is stored or redistributed
+here: Aura keeps Telegram's own file identifiers in `bot.db` after the bot has
+been granted access to the set, and operators are expected to point the file at
+their own set instead.
 
 External services
 -----------------

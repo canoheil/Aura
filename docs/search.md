@@ -77,7 +77,12 @@ ticker, a channel-specific product) to the force vocabulary.
 | `WEB_SEARCH_INCLUDE_DOMAINS`, `WEB_SEARCH_EXCLUDE_DOMAINS`, `WEB_SEARCH_BOOST_DOMAINS` | — | Domain filters |
 | `WEB_CONTENTS_ENABLED` | `true` | Open a specific page for deeper verification |
 | `WEB_CONTENTS_DAILY_LIMIT` | `10` | Page opens per day |
+| `WEB_CONTENTS_CACHE_TTL` | `3600` | How long an opened page stays cached |
+| `WEB_CONTENTS_TIMEOUT` | `20` | Timeout for one page fetch |
 | `WEB_SEARCH_FRESHNESS` | `auto` | Provider freshness hint |
+| `WEB_SEARCH_EXTRACTION` | `highlights` | What the provider returns: `none`, `highlights` or `full_page` |
+| `WEB_SEARCH_CRAWL_TIMEOUT` | `10` | Seconds the provider may spend reading a page (1–60) |
+| `WEB_SEARCH_OFFSET` | `0` | Result offset, for paging past the first page of hits |
 
 Opening pages has its own budget (`WEB_CONTENTS_*`) because it costs more than a
 search result snippet.

@@ -25,7 +25,7 @@ def test_database_check_rejects_missing_db(tmp_path):
 
 def test_process_identity_uses_expected_script(tmp_path):
     proc = tmp_path / "cmdline"
-    proc.write_bytes(b"/opt/python/bin/python\\0/home/auracom/aura/bot.py\\0")
+    proc.write_bytes(b"/opt/python/bin/python\\0/srv/aura/bot.py\\0")
     result = check_process_identity("bot.py", str(proc))
     assert result.ok is True
 

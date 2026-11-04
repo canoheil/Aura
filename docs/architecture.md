@@ -32,6 +32,39 @@ calls inside one turn are merged so a model that repeats itself does not pay
 twice. The loop stops as soon as the evidence is sufficient; there is no second
 "planner" model call.
 
+## The other entry point
+
+There is a second place a message can arrive — the owner's Telegram **Business
+account**, where a friend writes privately while the owner is away
+([details](business.md)). It is a separate entry point, not a separate assistant:
+
+```text
+business_message ──▶ handler group -2 ──▶ attachment? ──▶ group context?
+                                              │              (memberships verified)
+                                              ▼
+                                    the same prompt, the same agent loop
+```
+
+Three things are worth knowing before changing anything near it:
+
+- **It has its own handler groups.** python-telegram-bot runs *at most one
+  handler per group* (`process_update` breaks after the first match), and the
+  group-access guard is a `TypeHandler(Update)` that matches everything. Anything
+  registered beside the guard in group `-1` is therefore dead code — which is
+  exactly how the `BusinessConnectionHandler` was silently ignored once. The
+  layout is: `-3` business connections, `-2` business messages, `-1` the guard
+  alone, `0` commands and ordinary messages. `tests/test_business_mode.py`
+  asserts the ordering so it cannot come back.
+- **It subtracts instead of forking.** The turn is `build_system_prompt()` plus a
+  situational layer, run through `ask_model()`. The only difference is
+  `BUSINESS_EXCLUDED_TOOLS` (memory and reminders), removed from the tool
+  declarations *and* from the runner — hiding a declaration is not a guarantee,
+  refusing the execution is.
+- **Context crosses one way.** `group_memory.py` may read what was said in a group
+  into a private reply, and has no write path at all. Membership is verified with
+  `get_chat_member` and cached, so "is this person in that group" is answered by
+  Telegram rather than guessed.
+
 ## The prompt is layered
 
 Every layer has a different authority, and they are appended in this order:

@@ -18,7 +18,7 @@ labels: ["bug"]
 - Aura version / commit:
 - Python version (`python --version`):
 - Deployment: <!-- systemd / cPanel / bare `python bot.py` / container -->
-- Which optional features are enabled: <!-- web search, images, SVG, weather, memes, stickers -->
+- Which optional features are enabled: <!-- web search, images, SVG, weather, memes, stickers, secretary mode -->
 
 ## Relevant logs
 

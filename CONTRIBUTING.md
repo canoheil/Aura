@@ -74,8 +74,18 @@ commit `.env`, `bot.db`, `.aura_secret_key` or any other database file, even whe
 | `answer_quality.py` | Evidence checks and cleanup of model output |
 | `freshness_policy.py` | Decides when a search is mandatory |
 | `reminders.py` | Reminder parsing, storage, delivery |
+| `business_mode.py` | Secretary mode: the policy for answering someone else's messages, with no Telegram imports |
+| `group_memory.py` | Read-only digest of what a shared group already said, plus the membership cache |
 | `telegram_formatting.py` | HTML rendering and chunking |
 | `*_image.py`, `weather_api.py`, `meme_api.py`, `sticker_manager.py` | Optional capabilities |
+
+One trap is worth knowing on day one: python-telegram-bot runs **at most one
+handler per group**, and the group-access guard is a `TypeHandler(Update)` that
+matches every update. Registering anything beside it in the same group makes that
+handler dead code — which is how a `BusinessConnectionHandler` spent a release
+never running. Each kind of update gets its own group (see
+[Architecture](docs/architecture.md#the-other-entry-point)), and a test asserts the
+ordering.
 
 Application modules stay flat at the repository root; the tests live in `tests/`,
 one `test_*.py` file per module or feature. `pyproject.toml` adds the repository
@@ -137,6 +147,9 @@ the trade-off.
 
 Use the issue templates. For anything security-related, follow
 [SECURITY.md](SECURITY.md) instead of opening a public issue.
+
+Participation is covered by the [Code of Conduct](CODE_OF_CONDUCT.md); report
+unacceptable behaviour privately, the same way as a security issue.
 
 ## Translations
 

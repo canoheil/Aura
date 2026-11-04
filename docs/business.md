@@ -175,10 +175,14 @@ data. The pause switch is deployment state, not personal data, and stays.
 ```text
 Telegram ──▶ business_connection ──▶ business_connection_handler ──▶ business_connections
           └▶ business_message    ──▶ business_message_handler
+                                        │  download the attachment, if any
+                                        │  _business_group_context()  (verified memberships)
                                         │  review()  (rights, duplicates, limits)
-                                        ├─ compose  (model, no tools, no owner context)
+                                        ├─ compose  (Aura's own turn: same prompt, same tools,
+                                        │             owner's memory and reminders withheld)
                                         ├─ clean_reply()
-                                        └─ send_message(business_connection_id=…)
+                                        ├─ send_message(business_connection_id=…)
+                                        └─ deliver  (one sticker, any generated picture)
 ```
 
 - **`allowed_updates`** asks for `business_connection` and `business_message`

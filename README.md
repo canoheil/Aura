@@ -62,7 +62,7 @@ message, and `/deletemydata` wipes a person's data in one transaction.
 | Retrieval | Guarded You.com web search with a freshness gate, page opening, weather from Open-Meteo (keyless) |
 | Media in | Photos, image documents, stickers, voice, audio, video, video notes, documents, YouTube links |
 | Media out | Photorealistic images via Pollinations (optional), vector images rendered locally from SVG, Reddit memes (keyless) |
-| Secretary mode | Answers the owner's Telegram Business account: customers get a short, honest assistant reply; no tools, no owner context, `/secretary` pause switch |
+| Secretary mode | Answers the owner's Telegram Business account as the **same** Aura: one prompt, one engine, the same tools and media — minus the owner's memory and reminders. Reads photos, stickers, GIFs and voice; can send a sticker or a picture back; may use what was said in a group the person is verifiably in (one way only). `/secretary` pauses it |
 | Reminders | One-shot and repeating reminders with per-user timezones, Persian clock words and Solar Hijri dates, snooze/done/skip/stop buttons, mention delivery in groups |
 | Groups | Whitelisted groups only, trigger words and mentions, speaker-aware replies, conservative sticker cooldowns |
 | Operations | `/admin` panel, health checks, versioned schema migrations, startup service scripts, per-user quotas |
@@ -215,6 +215,9 @@ versioned and migrated forward, never silently rewritten.
 Bug reports, fixes and features are welcome — start with
 [CONTRIBUTING.md](CONTRIBUTING.md). Please report vulnerabilities privately as
 described in [SECURITY.md](SECURITY.md) rather than in a public issue.
+
+Everyone taking part is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

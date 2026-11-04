@@ -84,7 +84,7 @@ def test_reaction_manager_has_conservative_candidate_gate():
     manager = ReactionManager()
     assert manager.should_consider_ai("ممنون ❤️")
     assert not manager.should_consider_ai("https://example.com")
-    assert not manager.should_consider_ai("چند تا فایل در /home/auracom/aura هست؟")
+    assert not manager.should_consider_ai("چند تا فایل در /srv/aura هست؟")
 
 
 def test_no_sensitive_files_are_in_project_tree():

@@ -1,9 +1,10 @@
 # Reminders
 
-Reminders are **one-shot**, saved in `bot.db`, and scoped to the requesting user
-and chat. The default timezone is `Asia/Tehran`; each user can choose another
-IANA timezone, and existing reminders keep their original UTC instant when the
-timezone changes.
+Reminders are saved in `bot.db` and scoped to the requesting user and chat. They
+are **one-shot by default**, and can be **repeating** when the request names a
+repeat (`هر روز`, `هر شنبه`, `هر دو هفته`, `هر ماه پانزدهم`). The default timezone
+is `Asia/Tehran`; each user can choose another IANA timezone, and existing
+reminders keep their original UTC instant when the timezone changes.
 
 ```text
 ۱۰ دقیقه دیگه یادم بنداز آب بخورم
@@ -14,6 +15,10 @@ timezone changes.
 یادم بنداز ۲۸ آبان ساعت ۹ صبح تولد سارا
 /remind in 10m آب بخورم
 /remind 2030-11-01 09:30 جلسه
+هر روز ساعت ۸ صبح یادم بنداز قرص بخورم
+هر دوشنبه و چهارشنبه ساعت ۱۹:۳۰ یادم بنداز کلاس دارم
+هر ماه پانزدهم ساعت ۹ صبح یادم بنداز قبض رو بدم
+every two weeks at 9am remind me to check the books
 /reminders
 /cancelreminder 12
 /timezone Europe/Berlin
@@ -69,6 +74,54 @@ ambiguous follow-up. A short `لغوش کن` can cancel the most recently refere
 reminder in that same user/chat context; when the target is unclear, use its ID
 with `/cancelreminder`.
 
+## Repeating reminders
+
+A repeat is read from the same sentence as everything else, and the clock has to
+be there: the rule supplies the **day**, the message supplies the **time**.
+
+| You say | Stored rule | First occurrence |
+| --- | --- | --- |
+| `هر روز ساعت ۸ صبح` | `daily@08:00` | tomorrow 08:00 |
+| `هر دو روز ساعت ۸ صبح` | `daily/2@08:00` | two days on |
+| `هر شنبه ساعت ۱۰` | `weekly@10:00:5` | the next Saturday |
+| `هر دوشنبه و چهارشنبه ساعت ۱۹:۳۰` | `weekly@19:30:0,2` | the nearer of the two |
+| `هر هفته ساعت ۸:۳۰` | `weekly@08:30:<today's weekday>` | next week, same weekday |
+| `هر دو هفته ساعت ۹ صبح` | `weekly/2@09:00:<today's weekday>` | two weeks on |
+| `هر ماه پانزدهم ساعت ۹ صبح` | `monthly@09:00:15` | the next 15th |
+| `هر ماه ساعت ۹ صبح` | `monthly@09:00:<today's day>` | next month, same day |
+| `هر روز کاری ساعت ۸:۳۰` | `weekly@08:30:0,1,2,3,4` | Monday to Friday |
+
+Three decisions are worth stating:
+
+- **The rule stores a wall-clock time, not a UTC instant.** A daily 08:00 stays
+  08:00 across a daylight-saving change; a clock a zone skips moves forward
+  instead of killing the series.
+- **A month without the 31st uses its last day**, so `هر ماه سی‌ویکم` fires on
+  28 February rather than skipping February.
+- **One occurrence exists at a time.** The next row is written in the same
+  transaction that marks the previous one delivered, so `/reminders` always shows
+  the true next time, a crash cannot leave a year of rows behind, and a long
+  outage costs **one** late reminder rather than one per missed day. After an
+  outage the series continues on its own grid instead of drifting to "now".
+
+`snooze` moves one delivery, not the series: the occurrence fires ten minutes
+late and the next one is still at the rule's own time.
+
+Repeats this build will not guess at are refused with a reason, never silently
+turned into a single reminder: `هر سال` / `yearly`, `هر دو هفته شنبه و دوشنبه`
+(a multi-week interval takes one weekday), a repeat with only a duration
+(`هر روز ۱۰ دقیقه دیگه`) or with a date instead of a clock.
+
+A repeat can also be completed across two messages, like any other request:
+
+```text
+You:  هر شنبه یادم بنداز بازار برم
+Aura: چه ساعتی؟ مثلاً «۹ صبح» یا «۱۷:۳۰».
+You:  ۱۰ صبح
+Aura: … ⏰ شنبه ۱۷ آبان ۱۴۰۵، ساعت ۱۰:۰۰ صبح
+      🔁 تکرار: هر شنبه، ساعت ۱۰:۰۰ صبح
+```
+
 ## The reminder tool
 
 Aura also has a real reminder tool for less formulaic requests. It must quote the
@@ -102,7 +155,6 @@ before this feature existed.
 Every accepted proposal is logged with the phrase it came from, so a surprising
 reminder can be traced to the words that caused it.
 
-- Repeating schedules are not supported.
 - Nonexistent or repeated local times at daylight-saving transitions are
   rejected; an explicit UTC offset, e.g. `2030-10-27 02:30+02:00`, disambiguates
   them.
@@ -128,6 +180,26 @@ that moment:
 The confirmation, while the reminder is still pending, carries the third useful
 decision instead — **✖️ لغو این یادآور** — because a typo is cheap to fix until
 the thing actually fires.
+
+A repeating reminder gets a second line of buttons, because it has two decisions
+a one-shot reminder does not:
+
+```text
+⏰ یادت نره: قرص بخورم
+[ ⏰ ۱۰ دقیقه بعد ]  [ ✅ انجام شد ]
+[ 🔂 این یکی رو رد کن ]  [ ⏹ تکرار رو متوقف کن ]
+```
+
+- **🔂 این یکی رو رد کن** moves the series past its next occurrence and answers
+  with the new one; the series itself keeps its grid.
+- **⏹ تکرار رو متوقف کن** cancels whatever is still waiting and ends the series.
+  The occurrences already delivered stay as history, and the message you pressed
+  it on is marked `⏹ تکرار متوقف شد` rather than cancelled.
+
+`/cancelreminder <id>` ends a series from any of its numbers, including the one
+in a delivered message: a person should not have to know which occurrence is
+still waiting. The occurrences already delivered stay in the database as
+history and never disappear from it.
 
 A button only ever names a row and an action (`rm:done:12`); the person and the
 chat come from the Telegram update, and the row is looked up scoped to both. In a

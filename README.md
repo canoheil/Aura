@@ -15,7 +15,7 @@
 Aura is a personal assistant that lives in Telegram: she holds a conversation,
 remembers what matters, reads the photos, stickers, documents and voice notes
 people send her, searches the web when a question is about something that has
-changed recently, sets one-shot reminders, and draws pictures — vector drawings
+changed recently, sets one-shot and repeating reminders, and draws pictures — vector drawings
 locally, photographs through an image service you can leave disabled.
 
 It runs as one Python process against a single SQLite file. No Docker, no Redis,
@@ -62,7 +62,7 @@ message, and `/deletemydata` wipes a person's data in one transaction.
 | Retrieval | Guarded You.com web search with a freshness gate, page opening, weather from Open-Meteo (keyless) |
 | Media in | Photos, image documents, stickers, voice, audio, video, video notes, documents, YouTube links |
 | Media out | Photorealistic images via Pollinations (optional), vector images rendered locally from SVG, Reddit memes (keyless) |
-| Reminders | One-shot reminders with per-user timezones, Persian clock words and Solar Hijri dates, snooze/done buttons, mention delivery in groups |
+| Reminders | One-shot and repeating reminders with per-user timezones, Persian clock words and Solar Hijri dates, snooze/done/skip/stop buttons, mention delivery in groups |
 | Groups | Whitelisted groups only, trigger words and mentions, speaker-aware replies, conservative sticker cooldowns |
 | Operations | `/admin` panel, health checks, versioned schema migrations, startup service scripts, per-user quotas |
 | Languages | Persian (default) and English, per user, with a full interface catalog |
@@ -112,7 +112,7 @@ reproducible environment.
 | `/memory`, `/remember <text>`, `/forget <text>` | Read, add to, or delete from long-term memory |
 | `/stats` | Conversation and memory statistics |
 | `/image <prompt>` | Generate an image, or edit the photo you replied to |
-| `/remind <when> <task>` | Create a one-shot reminder |
+| `/remind <when> <task>` | Create a reminder, one-shot or repeating |
 | `/reminders`, `/cancelreminder <id>`, `/timezone` | Manage reminders and the per-user timezone |
 | `/language` | Switch between Persian and English |
 | `/usage` | Today's counter, the limits and when they reset |
@@ -169,7 +169,7 @@ on Gemini or on a local Ollama model.
 | `settings_store.py`, `admin_panel.py` | Runtime settings, the `/admin` panel, audit trail |
 | `aura_identity.py`, `aura_personality_boundary.py`, `persona.py` | Who Aura is, and where style is allowed to change |
 | `freshness_policy.py`, `answer_quality.py` | When a search is mandatory, and what a trustworthy answer looks like |
-| `reminder_time.py`, `reminders.py`, `memory_bridge.py`, `data_deletion.py` | Time parsing, durable state and its lifecycle |
+| `reminder_time.py`, `recurrence.py`, `reminders.py`, `memory_bridge.py`, `data_deletion.py` | Time and repeat parsing, durable state and its lifecycle |
 | `telegram_formatting.py`, `i18n.py` | Copy-safe HTML and the Persian/English catalog |
 | `sticker_manager.py`, `sticker_vision.py`, `svg_image.py`, `pollinations_image.py`, `meme_api.py`, `weather_api.py` | Optional capabilities |
 

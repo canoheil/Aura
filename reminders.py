@@ -1,9 +1,13 @@
-"""Durable one-shot reminders, with explicit timezone and safe scheduling.
+"""Durable reminders — one-shot and repeating — with explicit timezone and safe scheduling.
 
 All due times are stored in UTC; the user's IANA timezone is retained to show
 exactly how a reminder was scheduled. The worker makes at-least-once delivery
 attempts: Telegram has no idempotency key, so a crash after Telegram accepted a
 message but before SQLite recorded success can result in a duplicate.
+
+A repeating reminder keeps its rule in the same row and holds one occurrence at
+a time: the next row is written in the transaction that records delivery, so a
+crash cannot stop a series or double it.
 
 Everything about *understanding* the request lives in `reminder_time`; this
 module only stores, claims and delivers. Keeping the two apart is what lets the
@@ -18,7 +22,7 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 
@@ -53,6 +57,20 @@ from reminder_time import (
 
 logger = logging.getLogger("aura-reminders")
 MAX_PENDING_PER_USER = 100
+
+
+def _safe_rule(rule: str):
+    """Parse a stored rule, or raise a caller-facing error. Never guess."""
+    from recurrence import Recurrence
+
+    try:
+        parsed = Recurrence.parse(rule)
+    except (ValueError, TypeError):
+        parsed = None
+    if parsed is None:
+        raise ReminderError("قاعدهٔ تکرار معتبر نیست؛ دوباره با ساعت مشخص ثبتش کن.", code="recurring")
+    return parsed
+
 
 # Re-exported: callers and tests import the reminder language from here.
 __all__ = [
@@ -103,11 +121,19 @@ class ReminderStore:
                 status TEXT NOT NULL DEFAULT 'pending', next_attempt INTEGER NOT NULL,
                 lease_until INTEGER NOT NULL DEFAULT 0, claim_token TEXT,
                 attempts INTEGER NOT NULL DEFAULT 0, delivered_at INTEGER, last_error TEXT NOT NULL DEFAULT '',
-                recipient_name TEXT NOT NULL DEFAULT ''
+                recipient_name TEXT NOT NULL DEFAULT '',
+                recurrence TEXT NOT NULL DEFAULT '', series_id INTEGER NOT NULL DEFAULT 0,
+                occurrence INTEGER NOT NULL DEFAULT 0, anchor_utc INTEGER NOT NULL DEFAULT 0
             )""")
-            # Shared with the versioned migration of the same name, so an old
+            # Shared with the versioned migrations of the same names, so an old
             # database is fixed here too when the store is used on its own.
             migrations.ensure_reminder_recipient_column(self.db)
+            migrations.ensure_reminder_recurrence_columns(self.db)
+            # One row per occurrence number per series: a delivery retried after
+            # a crash can try to write the same next occurrence twice, and the
+            # database refuses rather than the series quietly doubling.
+            self.db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_series
+                ON reminders(series_id, occurrence) WHERE series_id > 0""")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, next_attempt, due_utc)")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_reminders_owner ON reminders(user_id, chat_id, status)")
             self.db.commit()
@@ -148,12 +174,21 @@ class ReminderStore:
                 ).fetchone()["n"]
                 if count >= MAX_PENDING_PER_USER:
                     raise ReminderError("تعداد یادآورهای فعال به سقف مجاز رسیده است؛ یکی را لغو کن.", code="limit_reached")
+                rule = str(getattr(spec, "recurrence", "") or "").strip()
+                if rule:
+                    _safe_rule(rule)
                 cur = self.db.execute("""INSERT INTO reminders
-                    (chat_id, user_id, text, due_utc, timezone, created_at, status, next_attempt, recipient_name)
-                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
-                    (chat_id, user_id, text, due, spec.timezone, now, due, name))
+                    (chat_id, user_id, text, due_utc, timezone, created_at, status, next_attempt,
+                     recipient_name, recurrence, occurrence, anchor_utc)
+                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, 0, ?)""",
+                    (chat_id, user_id, text, due, spec.timezone, now, due, name, rule, due if rule else 0))
+                reminder_id = int(cur.lastrowid)
+                if rule:
+                    # The first row is also the series: its id is the handle
+                    # every later occurrence carries.
+                    self.db.execute("UPDATE reminders SET series_id=? WHERE id=?", (reminder_id, reminder_id))
                 self.db.commit()
-                return int(cur.lastrowid)
+                return reminder_id
             except Exception:
                 # A failed commit must not leave an uncommitted row that some
                 # unrelated later operation could accidentally commit.
@@ -243,12 +278,102 @@ class ReminderStore:
                 raise
 
     def mark_sent(self, row: dict) -> bool:
+        """Record a delivery, and — for a repeating one — write the next occurrence.
+
+        The flip and the new row share one transaction: a crash cannot leave a
+        series that fired once and then silently stopped, nor one that fires
+        the same occurrence twice. `INSERT OR IGNORE` on the (series, occurrence)
+        index makes a retried call harmless.
+        """
+        now = int(self.clock())
         with self.lock:
-            cur = self.db.execute("""UPDATE reminders SET status='sent', delivered_at=?, lease_until=0,
-                claim_token=NULL, last_error='' WHERE id=? AND status='sending' AND claim_token=?""",
-                (int(self.clock()), row["id"], row["claim_token"]))
+            try:
+                cur = self.db.execute("""UPDATE reminders SET status='sent', delivered_at=?, lease_until=0,
+                    claim_token=NULL, last_error='' WHERE id=? AND status='sending' AND claim_token=?""",
+                    (now, row["id"], row["claim_token"]))
+                if cur.rowcount == 1 and str(row.get("recurrence") or ""):
+                    self._write_next_occurrence(row, now)
+                self.db.commit()
+                return cur.rowcount == 1
+            except Exception:
+                self.db.rollback()
+                raise
+
+    def _write_next_occurrence(self, row: dict, now: int) -> None:
+        """Insert the following occurrence. Returns quietly on an unusable rule.
+
+        A delivery that already happened cannot be un-happened, so a broken rule
+        ends its series instead of raising into the delivery path; the reason is
+        kept on the delivered row for whoever looks.
+        """
+        try:
+            rule = _safe_rule(str(row["recurrence"]))
+            # The rule's own instant, not the snoozed one: a delivery pushed
+            # back ten minutes must not move every later occurrence with it.
+            anchor = int(row.get("anchor_utc") or 0) or int(row["due_utc"])
+            previous = datetime.fromtimestamp(anchor, tz=timezone.utc)
+            next_due = int(rule.next_after(previous, datetime.fromtimestamp(now, tz=timezone.utc),
+                                           timezone_for(row["timezone"])).timestamp())
+        except Exception as exc:
+            logger.warning("Series stopped | id=%s | %s", row["id"], exc)
+            self.db.execute("UPDATE reminders SET last_error=? WHERE id=?",
+                            (f"series stopped: {exc}"[:80], row["id"]))
+            return
+        series = int(row.get("series_id") or 0) or int(row["id"])
+        self.db.execute("""INSERT OR IGNORE INTO reminders
+            (chat_id, user_id, text, due_utc, timezone, created_at, status, next_attempt,
+             recipient_name, recurrence, series_id, occurrence, anchor_utc)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)""",
+            (row["chat_id"], row["user_id"], row["text"], next_due, row["timezone"], now,
+             next_due, row.get("recipient_name") or "", row["recurrence"], series,
+             int(row.get("occurrence") or 0) + 1, next_due))
+
+    def _series_of(self, row: dict) -> int:
+        return int(row.get("series_id") or 0) or int(row["id"])
+
+    def cancel_series(self, chat_id: int, user_id: int, reminder_id: int) -> bool:
+        """End a repeating series. Returns True when something was cancelled.
+
+        Whatever is still waiting is cancelled; a copy that was already delivered
+        stays as history. Because only one occurrence is ever pending, this is
+        both "stop repeating" and "cancel this series".
+        """
+        with self.lock:
+            row = self.db.execute("SELECT * FROM reminders WHERE id=? AND chat_id=? AND user_id=?",
+                                  (reminder_id, chat_id, user_id)).fetchone()
+            if not row:
+                return False
+            series = self._series_of(dict(row))
+            cur = self.db.execute("""UPDATE reminders SET status='cancelled', claim_token=NULL, lease_until=0
+                WHERE chat_id=? AND user_id=? AND (id=? OR series_id=?)
+                AND status IN ('pending', 'failed')""", (chat_id, user_id, series, series))
             self.db.commit()
-            return cur.rowcount == 1
+            return cur.rowcount >= 1
+
+    def skip_next(self, chat_id: int, user_id: int, reminder_id: int) -> Optional[int]:
+        """Move a repeating reminder past its next occurrence. Returns the new due."""
+        now = int(self.clock())
+        with self.lock:
+            try:
+                target = self.db.execute("""SELECT * FROM reminders WHERE chat_id=? AND user_id=?
+                    AND (id=? OR series_id=?) AND recurrence != ''
+                    AND status IN ('pending', 'failed') ORDER BY due_utc, id LIMIT 1""",
+                    (chat_id, user_id, reminder_id, reminder_id)).fetchone()
+                if not target:
+                    self.db.commit()
+                    return None
+                target = dict(target)
+                rule = _safe_rule(str(target.get("recurrence") or ""))
+                previous = datetime.fromtimestamp(int(target["due_utc"]), tz=timezone.utc)
+                due = int(rule.next_after(previous, datetime.fromtimestamp(now, tz=timezone.utc),
+                                          timezone_for(target["timezone"])).timestamp())
+                self.db.execute("""UPDATE reminders SET due_utc=?, next_attempt=?, attempts=0,
+                    anchor_utc=? WHERE id=?""", (due, due, due, target["id"]))
+                self.db.commit()
+                return due
+            except Exception:
+                self.db.rollback()
+                raise
 
     def retry(self, row: dict, *, delay: int, error: str) -> bool:
         with self.lock:
@@ -284,11 +409,20 @@ def reminder_buttons(row: dict, lang: Optional[str] = None, *, snooze_minutes: i
     minutes = str(max(1, int(snooze_minutes)))
     if not str(lang or "").lower().startswith("en"):
         minutes = fa_digits(minutes)
-    return InlineKeyboardMarkup([[
+    rows = [[
         InlineKeyboardButton(i18n.t("reminder.button.snooze", lang, minutes=minutes),
                              callback_data=f"rm:snooze:{reminder_id}"),
         InlineKeyboardButton(i18n.t("reminder.button.done", lang), callback_data=f"rm:done:{reminder_id}"),
-    ]])
+    ]]
+    if str(row.get("recurrence") or ""):
+        # A repeating reminder has two decisions a one-shot one does not: live
+        # with one occurrence happening later, or end the series here.
+        rows.append([
+            InlineKeyboardButton(i18n.t("reminder.button.skip", lang), callback_data=f"rm:skip:{reminder_id}"),
+            InlineKeyboardButton(i18n.t("reminder.button.stop_repeating", lang),
+                                 callback_data=f"rm:unrepeat:{reminder_id}"),
+        ])
+    return InlineKeyboardMarkup(rows)
 
 
 def cancel_buttons(row: dict, lang: Optional[str] = None) -> InlineKeyboardMarkup:

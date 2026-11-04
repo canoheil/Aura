@@ -299,8 +299,8 @@ CATALOG: dict[str, dict[str, str]] = {
         "en": "🧹 Erased {count} stored row(s) from the customer conversations.",
     },
     "secretary.reply.media": {
-        "fa": "الان نمی‌توانم عکس و فایل را ببینم؛ اگر متنش را بنویسی، همان‌جا جواب می‌دهم.",
-        "en": "I can't see photos or files yet — write it out and I'll answer right here.",
+        "fa": "این نوع فایل را نمی‌توانم ببینم؛ اگر متنش را بنویسی، همان‌جا جواب می‌دهم.",
+        "en": "I can't open this kind of file — write it out and I'll answer right here.",
     },
     "remind.usage": {
         "fa": (

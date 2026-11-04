@@ -4851,17 +4851,11 @@ def _business_owner_name(connection) -> str:
 BUSINESS_PRIVATE_TOOLS = frozenset({
     "memory_search", "memory_save", "memory_forget", "schedule_reminder",
 })
-# Tools whose whole point is to send something back into the chat. They arrive
-# with the outbound-media work; until then, advertising them would reserve a
-# sticker or render an image that nothing delivers.
-BUSINESS_OUTBOUND_TOOLS = frozenset({
-    "send_sticker", "generate_image", "create_svg_image", "fetch_meme",
-})
-BUSINESS_EXCLUDED_TOOLS = BUSINESS_PRIVATE_TOOLS | BUSINESS_OUTBOUND_TOOLS
+BUSINESS_EXCLUDED_TOOLS = BUSINESS_PRIVATE_TOOLS
 
 
 def _business_compose(*, transcript: list[dict], text: str, owner_name: str,
-                      prompt: str, owner_user_id: int = 0) -> str:
+                      prompt: str, owner_user_id: int = 0, media=None, chat_id: int = 0):
     """One full Aura turn, answering someone who wrote to the owner's account.
 
     This is the same engine as an ordinary chat: Aura's own system prompt,
@@ -4875,26 +4869,100 @@ def _business_compose(*, transcript: list[dict], text: str, owner_name: str,
     # The owner's own model choice; the person writing never picks it.
     model = get_user_model(owner_id) if owner_id else ""
     system_instruction = "\n\n".join(
-        part for part in (
-            build_system_prompt(user_id=owner_id, model=model, allow_media_tools=False),
-            prompt,
-        ) if part
+        part for part in (build_system_prompt(user_id=owner_id, model=model), prompt) if part
     )
+    # Pictures a tool builds land here and are sent after the text reply, exactly
+    # as in an ordinary chat. The handler also receives its own ids, so a sticker
+    # is reserved per conversation and never for the owner's other chats.
+    image_delivery: list = []
+    if media is not None:
+        content: object = [
+            {"type": "text", "text": text or media.hint or "این تصویر را ببین."},
+            {"type": "media_bytes", "data": media.data, "mime_type": media.mime_type},
+        ]
+    else:
+        content = text
     messages = [
         {"role": "system", "content": system_instruction},
         *transcript,
-        {"role": "user", "content": text},
+        {"role": "user", "content": content},
     ]
-    answer, _meta, _events = ask_model(
+    answer, _meta, tool_events = ask_model(
         model=model,
         messages=messages,
         owner_user_id=owner_id,
-        extra_context={"chat_id": 0, "user_id": owner_id, "is_group": False},
+        extra_context={
+            "chat_id": int(chat_id or 0),
+            "user_id": owner_id,
+            "is_group": False,
+            "image_delivery": image_delivery,
+        },
         current_user_text=text,
-        allow_meme_tool=False,
+        allow_meme_tool=bool(meme_client.is_enabled),
         exclude_tools=BUSINESS_EXCLUDED_TOOLS,
     )
-    return answer or ""
+    sticker = _pending_sticker_tag(tool_events) if STICKERS_ENABLED else ""
+    return business_mode.Reply(text=answer or "", sticker=sticker or "",
+                               images=tuple(image_delivery))
+
+
+async def _business_send_image(bot: Bot, connection_id: str, chat_id: int, image) -> bool:
+    """Send one tool-built picture through a business connection.
+
+    Mirrors `_send_generated_image`, but addressed to the customer chat rather
+    than a replied-to message: ``business_connection_id`` is what makes Telegram
+    accept it at all.
+    """
+    caption = None
+    for attempt in range(2):
+        try:
+            if getattr(image, "is_animation", False):
+                try:
+                    await bot.send_animation(chat_id=chat_id, animation=_telegram_image_file(image),
+                                             caption=caption, business_connection_id=connection_id)
+                    return True
+                except TelegramError:
+                    # Fall through to a still photo with a fresh stream.
+                    pass
+            if getattr(image, "telegram_safe_photo", False):
+                await bot.send_photo(chat_id=chat_id, photo=_telegram_image_file(image),
+                                     caption=caption, business_connection_id=connection_id)
+            else:
+                await bot.send_document(chat_id=chat_id, document=_telegram_image_file(image),
+                                        caption=caption, business_connection_id=connection_id)
+            return True
+        except RetryAfter as exc:
+            if attempt == 0:
+                await asyncio.sleep(min(float(exc.retry_after), 30))
+                continue
+            logger.info("Business image rate-limited | chat=%s", chat_id)
+            return False
+        except (Forbidden, BadRequest, TelegramError) as exc:
+            logger.warning("Business image send failed | chat=%s | %s", chat_id, type(exc).__name__)
+            return False
+    return False
+
+
+def _business_deliver(bot: Bot):
+    """Send the parts of a reply that follow its text: one sticker, any images."""
+
+    async def deliver(connection_id: str, chat_id: int, reply) -> None:
+        if reply.sticker:
+            entry = sticker_manager.get(reply.sticker)
+            if entry is None:
+                logger.warning("Business sticker skipped; entry missing | tag=%s", reply.sticker)
+            else:
+                try:
+                    await bot.send_sticker(chat_id=chat_id, sticker=entry.file_id,
+                                           business_connection_id=connection_id)
+                    logger.info("Business sticker sent | chat=%s | tag=%s", chat_id, reply.sticker)
+                except TelegramError as exc:
+                    logger.warning("Business sticker rejected | tag=%s | %s", reply.sticker, exc)
+        for image in reply.images or ():
+            sent = await _business_send_image(bot, connection_id, chat_id, image)
+            logger.info("Business image delivery | chat=%s | sent=%s", chat_id, sent)
+
+    return deliver
 
 
 def _business_secretary(bot: Bot) -> "business_mode.Secretary":
@@ -4920,6 +4988,7 @@ def _business_secretary(bot: Bot) -> "business_mode.Secretary":
         bot_user_id=int(getattr(bot, "id", 0) or 0),
         allow_groups=BUSINESS_ALLOW_GROUPS,
         disclose_always=BUSINESS_DISCLOSE_ALWAYS,
+        deliver=_business_deliver(bot),
     )
 
 
@@ -4979,7 +5048,81 @@ def _business_incoming(message) -> "business_mode.Incoming":
         sender_business_bot_id=int(getattr(message, "sender_business_bot", None).id)
         if getattr(message, "sender_business_bot", None) is not None else None,
         text=str(getattr(message, "text", "") or ""),
+        has_media=_business_has_media(message),
     )
+
+
+def _business_has_media(message) -> bool:
+    """Media Aura can actually look at (not any attachment)."""
+    return _business_media_source(message) is not None
+
+
+def _business_media_source(message) -> tuple[object, str, str] | None:
+    """(Telegram object, MIME type, helpful label) for a readable attachment.
+
+    Only what the model can genuinely inspect is listed. An animation is read
+    from its still frame because a video sticker/gif cannot be streamed into an
+    inline request without breaking the payload on the gateway provider.
+    """
+    photo = getattr(message, "photo", None)
+    if photo:
+        return photo[-1], "image/jpeg", "photo"
+    animation = getattr(message, "animation", None)
+    if animation is not None:
+        frame = getattr(animation, "thumbnail", None) or getattr(animation, "thumb", None)
+        if frame is not None:
+            return frame, "image/jpeg", "GIF, first frame"
+    if getattr(message, "sticker", None) is not None:
+        return message.sticker, "", "sticker"
+    voice = getattr(message, "voice", None)
+    if voice is not None:
+        return voice, str(getattr(voice, "mime_type", "") or "audio/ogg"), "voice message"
+    document = getattr(message, "document", None)
+    if document is not None:
+        mime = _inline_document_mime(document)
+        if mime in _INLINE_IMAGE_MIMES:
+            return document, mime, "image file"
+        if mime in _INLINE_AUDIO_MIMES:
+            return document, mime, "audio file"
+    return None
+
+
+async def _business_download_media(
+    message, context: ContextTypes.DEFAULT_TYPE, *, lang: Optional[str] = None,
+) -> Optional["business_mode.Media"]:
+    """Download what the person sent, or None when Aura cannot read it.
+
+    A sticker goes through the sticker pipeline because a .tgs/.webm sticker has
+    no readable file; its thumbnail is what the model can see.
+    """
+    source = _business_media_source(message)
+    if source is None:
+        return None
+    item, mime_type, label = source
+    if label == "sticker":
+        raw, mime_type, plan = await download_sticker(item, context, lang=lang)
+        # The model would otherwise read a sticker as a photograph and answer
+        # "what a nice picture"; this is the same framing an ordinary chat uses.
+        return business_mode.Media(data=raw, mime_type=mime_type, label="sticker",
+                                   hint=sticker_vision.describe_for_model(plan, ""))
+    raw = await _download_inline_file(
+        str(getattr(item, "file_id", "") or ""), context,
+        known_size=int(getattr(item, "file_size", 0) or 0),
+        limit=MAX_DOCUMENT_BYTES if not mime_type.startswith("image/") else MAX_IMAGE_BYTES,
+        lang=lang,
+    )
+    hints = {
+        "photo": "The person sent a photo with no caption. Look at it and answer what it shows "
+                 "or means, instead of asking them to describe it.",
+        "GIF, first frame": "The person sent a GIF. You are seeing a single still frame of it; "
+                            "respond to what it shows or expresses.",
+        "voice message": "The person sent a voice message instead of typing. Listen to it and "
+                         "answer what they actually said.",
+        "image file": "The person sent an image file. Look at it and answer what it shows.",
+        "audio file": "The person sent an audio file. Listen to it and answer what it contains.",
+    }
+    return business_mode.Media(data=raw, mime_type=mime_type, label=label,
+                               hint=hints.get(label, ""))
 
 
 async def business_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5000,15 +5143,29 @@ async def business_message_handler(update: Update, context: ContextTypes.DEFAULT
     if not getattr(message, "chat", None) or not BUSINESS_MODE_ENABLED:
         return
     text = str(getattr(message, "text", "") or "").strip()
-    if not text:
-        # A photo or voice note gets no invention about its contents.
+    if not text and not _business_has_media(message):
+        # Neither words nor anything readable: a service message or a file type
+        # Aura cannot see. Guessing about its contents would be worse than a
+        # plain "I can't see that".
         await _business_notice_unsupported(context, message)
         raise ApplicationHandlerStop
+    media = None
+    if _business_has_media(message):
+        try:
+            media = await _business_download_media(message, context, lang=user_language(user_id=None))
+        except MediaInputError as exc:
+            logger.info("Business media rejected | chat=%s | %s", message.chat_id, type(exc).__name__)
+            await _business_notice_unsupported(context, message)
+            raise ApplicationHandlerStop
+        except Exception:
+            logger.warning("Business media could not be downloaded | chat=%s", message.chat_id, exc_info=True)
+            await _business_notice_unsupported(context, message)
+            raise ApplicationHandlerStop
     sender = getattr(message, "from_user", None)
     customer = " ".join(str(getattr(sender, "first_name", "") or "").split())[:60] if sender else ""
     try:
         await _business_secretary(context.bot).handle(
-            _business_incoming(message), customer_name=customer,
+            _business_incoming(message), customer_name=customer, media=media,
         )
     except Exception:
         logger.warning("Business message could not be answered | chat=%s", message.chat_id, exc_info=True)

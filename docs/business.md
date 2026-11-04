@@ -53,9 +53,30 @@ Every reply is a **single short message**. No headings, no bullet lists, no
 signatures, no links unless the customer sent one, and no mention of other
 conversations.
 
-Saying "I can't see that" is still answering, so the notice sent for a photo or a
-file obeys **every** gate a text reply does: `/secretary off`, a revoked grant and
-a connection without the reply right all keep Aura silent, media included.
+### What it can see and send
+
+A message is not always words. Aura reads what the person sends:
+
+| Sent | How it is read |
+| --- | --- |
+| Photo, or an image file | Downloaded inline (8 MB cap) and handed to the model as an image |
+| GIF | Its **still frame**, because an animation cannot be streamed inline on the gateway provider |
+| Sticker | The sticker pipeline: `.tgs`/`.webm` stickers arrive as their thumbnail, framed as "a sticker, not a photograph" |
+| Voice note | Handed over as audio, with the declared MIME type |
+| Anything else (PDF, archive, video) | Nothing is invented: one honest line, and no model call |
+
+The reply can carry media too — the same tools as any chat:
+
+- **A sticker** from the owner's pack, reserved per conversation and sent right
+  after the text with the same `business_connection_id`.
+- **A generated picture, SVG or meme**, sent as a photo (or as an animation when
+  the source is one).
+
+Delivery happens *after* the validated text, and a failure there is logged, never
+allowed to cost the answer. Saying "I can't see that" is still answering, so the
+notice for an unreadable file obeys **every** gate a text reply does:
+`/secretary off`, a revoked grant and a connection without the reply right all keep
+Aura silent, media included.
 
 ### The boundary, in the prompt itself
 
@@ -87,7 +108,7 @@ Some messages are not answered, deliberately:
 | A message older than `BUSINESS_MAX_MESSAGE_AGE_SECONDS` | ignored, not answered late |
 | More than `BUSINESS_MAX_REPLIES_PER_HOUR` in one chat | nothing is sent |
 | Two messages less than a few seconds apart | the second waits for the next message |
-| A voice note, photo or document | one line saying only text can be read |
+| A file Aura cannot read (PDF, archive, video) | one honest line, and no model call |
 
 The reply itself is checked before it is sent: an empty answer, a wall of text, a
 code block, or a link the customer never sent is discarded. Silence is a valid
@@ -154,14 +175,18 @@ Telegram ──▶ business_connection ──▶ business_connection_handler ─
   `build_system_prompt()` — identity, personality, style, date anchor, search
   policy — with the situational layer from `secretary_prompt()` appended, never
   substituted. The old separate persona is what made the mode sound like a
-  different, stiffer bot. `allow_media_tools=False` keeps the prompt from
-  advertising a sticker or image tool the turn cannot use.
+  different, stiffer bot. The prompt advertises exactly the tools the turn has,
+  so it never offers a sticker or a picture it could not send.
 - **The owner's private tools are removed twice.** `BUSINESS_EXCLUDED_TOOLS`
-  (`memory_search`, `memory_save`, `memory_forget`, `schedule_reminder`, plus the
-  outbound-media tools until they are delivered) is applied to the Gemini
-  declarations *and* to the runner (`ToolRegistry.without` + `_restricted_runner`),
-  so a hallucinated `memory_save` call is refused instead of executed. Search,
-  `web_open` and weather are available exactly as in any other chat.
+  (`memory_search`, `memory_save`, `memory_forget`, `schedule_reminder`) is applied
+  to the Gemini declarations *and* to the runner (`ToolRegistry.without` +
+  `_restricted_runner`), so a hallucinated `memory_save` call is refused instead of
+  executed. Everything else is available exactly as in any other chat: search,
+  `web_open`, weather, stickers and the picture tools.
+- **A picture tool's output is delivered by the deployment, not the module.**
+  `Secretary.handle` receives a `Reply(text, sticker, images)` and calls the
+  injected `deliver` only after the text was accepted, with the same connection
+  id, so a Telegram failure on the sticker or photo cannot eat the answer.
 - **Only that chat's transcript rides along.** No owner history, no memory, no
   files; the module still reads its own `business_messages` rows and nothing
   else. The connection id comes from the update, never from the model.

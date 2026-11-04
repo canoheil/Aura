@@ -23,6 +23,7 @@ from business_mode import (
     BusinessStore,
     Incoming,
     Limits,
+    Reply,
     Secretary,
     clean_reply,
     secretary_prompt,
@@ -340,7 +341,37 @@ def _run_business(bot, update, telegram):
 
 
 def _telegram():
-    return SimpleNamespace(id=BOT_ID, send_message=AsyncMock())
+    class _File:
+        async def download_to_memory(self, *, out):
+            out.write(b"\xff\xd8\xff\xe0fake-jpeg\xff\xd9")
+
+    return SimpleNamespace(
+        id=BOT_ID,
+        send_message=AsyncMock(),
+        send_sticker=AsyncMock(),
+        send_photo=AsyncMock(),
+        send_animation=AsyncMock(),
+        send_document=AsyncMock(),
+        get_file=AsyncMock(return_value=_File()),
+    )
+
+
+def _media_message(*, text="", photo=True, sticker=False, animation=False, voice=False,
+                   document=None, **kwargs):
+    """A business message carrying an attachment instead of (or besides) words."""
+    update = _business_message(text=text, **kwargs)
+    message = update.business_message
+    message.photo = [SimpleNamespace(file_id="photo-file", file_size=2048)] if photo else []
+    message.sticker = (SimpleNamespace(file_id="sticker-file", is_animated=False, is_video=False,
+                                       file_size=1024, emoji="🙂", set_name=None)
+                       if sticker else None)
+    message.animation = (SimpleNamespace(file_id="anim-file", file_size=2048,
+                                         thumbnail=SimpleNamespace(file_id="anim-thumb", file_size=512),
+                                         thumb=None) if animation else None)
+    message.voice = (SimpleNamespace(file_id="voice-file", file_size=2048, mime_type="audio/ogg")
+                     if voice else None)
+    message.document = document
+    return update
 
 
 def test_the_connection_is_stored_and_the_owner_is_told(isolated_bot):
@@ -417,7 +448,7 @@ def test_a_media_message_is_answered_without_guessing(isolated_bot):
     telegram = _telegram()
     _run_business(bot, _business_message(text=None), telegram)
     said = telegram.send_message.await_args.kwargs["text"]
-    assert "نمی‌توانم عکس" in said
+    assert "این نوع فایل" in said
     # It used to promise to keep the file "for the owner" — a promise nothing
     # keeps, in a persona the owner does not want.
     assert "مدیر" not in said
@@ -878,9 +909,197 @@ def test_a_call_to_a_tool_it_does_not_have_is_refused_and_answered_around(isolat
     assert bot.db.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 0
 
 
-def test_the_prompt_does_not_advertise_media_it_cannot_send_yet(isolated_bot):
+def test_the_business_prompt_is_the_main_prompt_plus_the_situation(isolated_bot):
+    """Prefix equality: nothing of Aura's own prompt is dropped or rewritten."""
     bot, client = isolated_bot
-    bot.STICKERS_ENABLED = True
     _business_turn(bot, client)
     system = client.models.requests[0][2].system_instruction
-    assert "send_sticker" not in system
+    assert system.startswith(bot.build_system_prompt(user_id=OWNER_ID))
+    assert "## Right now" in system
+
+
+# --- inbound media: Aura looks at what was sent ---------------------------
+
+def test_a_photo_reaches_the_model_as_a_real_image(isolated_bot):
+    bot, client = isolated_bot
+    client.models.responses = [_text_response("خیلی قشنگه!")]
+    _grant(bot)
+    telegram = _telegram()
+    _run_business(bot, _media_message(text="اینو ببین", photo=True), telegram)
+
+    parts = client.models.requests[0][1][-1].parts
+    blobs = [part for part in parts if part.inline_data is not None]
+    assert len(blobs) == 1
+    assert blobs[0].inline_data.mime_type == "image/jpeg"
+    assert blobs[0].inline_data.data.startswith(b"\xff\xd8")
+    assert any(part.text and "اینو ببین" in part.text for part in parts)
+    assert telegram.send_message.await_args.kwargs["text"] == "خیلی قشنگه!"
+
+
+def test_a_photo_without_a_caption_still_gets_an_answer(isolated_bot):
+    """No words is not "nothing to answer": the picture is the message."""
+    bot, client = isolated_bot
+    client.models.responses = [_text_response("چه گربه‌ای!")]
+    _grant(bot)
+    telegram = _telegram()
+    _run_business(bot, _media_message(text=""), telegram)
+
+    parts = client.models.requests[0][1][-1].parts
+    assert any(part.inline_data is not None for part in parts)
+    assert telegram.send_message.await_args.kwargs["text"] == "چه گربه‌ای!"
+
+
+def test_a_sticker_is_read_as_a_sticker_and_not_as_a_photograph(isolated_bot):
+    bot, client = isolated_bot
+    client.models.responses = [_text_response("😂")]
+    _grant(bot)
+    telegram = _telegram()
+    _run_business(bot, _media_message(text="", photo=False, sticker=True), telegram)
+
+    texts = [part.text for part in client.models.requests[0][1][-1].parts if part.text]
+    joined = " ".join(texts)
+    assert "Telegram sticker" in joined
+    assert telegram.send_message.await_args.kwargs["text"] == "😂"
+
+
+def test_a_gif_is_read_from_its_still_frame(isolated_bot):
+    bot, client = isolated_bot
+    client.models.responses = [_text_response("چه باحال")]
+    _grant(bot)
+    telegram = _telegram()
+    _run_business(bot, _media_message(text="", photo=False, animation=True), telegram)
+
+    parts = client.models.requests[0][1][-1].parts
+    assert any(part.inline_data is not None for part in parts)
+    telegram.send_message.assert_awaited()
+
+
+def test_a_voice_note_is_sent_to_the_model_as_audio(isolated_bot):
+    bot, client = isolated_bot
+    client.models.responses = [_text_response("شنیدم، می‌رسانم.")]
+    _grant(bot)
+    telegram = _telegram()
+    _run_business(bot, _media_message(text="", photo=False, voice=True), telegram)
+
+    parts = client.models.requests[0][1][-1].parts
+    audio = [part for part in parts if part.inline_data is not None]
+    assert audio and audio[0].inline_data.mime_type == "audio/ogg"
+
+
+def test_a_file_aura_cannot_read_still_gets_the_honest_line(isolated_bot):
+    bot, client = isolated_bot
+    client.models.responses = []
+    _grant(bot)
+    telegram = _telegram()
+    document = SimpleNamespace(file_id="doc", file_name="report.pdf", mime_type="application/pdf",
+                               file_size=2048)
+    _run_business(bot, _media_message(text="", photo=False, document=document), telegram)
+    assert "نمی‌توانم" in telegram.send_message.await_args.kwargs["text"] and "فایل" in telegram.send_message.await_args.kwargs["text"]
+    assert client.models.requests == []
+
+
+# --- outbound media: the reply can carry a sticker or a picture -----------
+
+def test_a_sticker_is_sent_through_the_business_connection(isolated_bot, monkeypatch):
+    bot, _ = isolated_bot
+    entry = SimpleNamespace(file_id="pack-sticker-file")
+    monkeypatch.setattr(bot.sticker_manager, "get", lambda tag: entry if tag == "happy" else None)
+    telegram = _telegram()
+
+    asyncio.run(bot._business_deliver(telegram)(
+        CONNECTION, 555, bot.business_mode.Reply(text="سلام", sticker="happy"),
+    ))
+    telegram.send_sticker.assert_awaited_once_with(
+        chat_id=555, sticker="pack-sticker-file", business_connection_id=CONNECTION,
+    )
+
+
+def test_an_image_is_sent_as_a_photo_through_the_connection(isolated_bot):
+    bot, _ = isolated_bot
+    image = SimpleNamespace(data=b"\xff\xd8\xff\xe0fake", filename="aura.jpg",
+                            telegram_safe_photo=True, mime_type="image/jpeg", is_animation=False)
+    telegram = _telegram()
+    assert asyncio.run(bot._business_send_image(telegram, CONNECTION, 555, image)) is True
+    kwargs = telegram.send_photo.await_args.kwargs
+    assert kwargs["chat_id"] == 555
+    assert kwargs["business_connection_id"] == CONNECTION
+
+
+def test_a_reply_that_queues_a_sticker_still_sends_its_text_first():
+    store, _ = _store()
+    _connection(store)
+    delivered = []
+
+    def compose(**_kwargs):
+        return Reply(text="سلام، خوبم.", sticker="happy")
+
+    async def send(connection_id, chat_id, text):
+        delivered.append(("text", text))
+        return True
+
+    async def deliver(connection_id, chat_id, reply):
+        delivered.append(("sticker", reply.sticker))
+
+    secretary = Secretary(store, compose=compose, send=send, limits=_limits(), deliver=deliver)
+    assert _answer(secretary) == "sent"
+    assert delivered == [("text", "سلام، خوبم."), ("sticker", "happy")]
+
+
+def test_a_failing_attachment_never_costs_the_text():
+    store, _ = _store()
+    _connection(store)
+
+    async def send(connection_id, chat_id, text):
+        return True
+
+    def deliver(*_args):
+        raise RuntimeError("Telegram said no")
+
+    secretary = Secretary(store, compose=lambda **k: Reply(text="سلام", sticker="happy"),
+                          send=send, limits=_limits(), deliver=deliver)
+    assert _answer(secretary) == "sent"
+    assert store.history(CONNECTION, 555)[-1]["content"] == "سلام"
+
+
+def test_a_reply_is_stored_without_the_sticker_tag():
+    store, _ = _store()
+    _connection(store)
+    secretary = Secretary(store, compose=lambda **k: Reply(text="خوبم", sticker="happy"),
+                          send=lambda *a: True, limits=_limits(), deliver=lambda *a: None)
+    _answer(secretary)
+    assert [row["content"] for row in store.history(CONNECTION, 555)] == ["سلام، قیمت چنده؟", "خوبم"]
+
+
+def test_a_sticker_the_model_asks_for_is_carried_into_the_reply(isolated_bot, monkeypatch):
+    """The tool only reserves a tag; the reply must carry it out of the thread."""
+    bot, _ = isolated_bot
+    monkeypatch.setattr(bot, "STICKERS_ENABLED", True)
+    seen = {}
+
+    def fake_ask_model(**kwargs):
+        seen.update(kwargs)
+        return "سلام", None, [{"tool": "send_sticker", "result": {"ok": True, "tag": "happy"}}]
+
+    monkeypatch.setattr(bot, "ask_model", fake_ask_model)
+    reply = bot._business_compose(transcript=[], text="یه استیکر بفرست", owner_name="Sara",
+                                  prompt="", owner_user_id=OWNER_ID, chat_id=555)
+    assert isinstance(reply, Reply)
+    assert reply.sticker == "happy"
+    # And the owner's private tools were still withdrawn from that turn.
+    assert seen["exclude_tools"] == bot.BUSINESS_EXCLUDED_TOOLS
+    assert seen["extra_context"]["chat_id"] == 555
+
+
+def test_an_image_a_tool_builds_is_carried_into_the_reply(isolated_bot, monkeypatch):
+    bot, _ = isolated_bot
+    image = SimpleNamespace(data=b"\xff\xd8\xff\xe0fake", filename="a.jpg")
+
+    def fake_ask_model(**kwargs):
+        kwargs["extra_context"]["image_delivery"].append(image)
+        return "بفرما", None, []
+
+    monkeypatch.setattr(bot, "ask_model", fake_ask_model)
+    reply = bot._business_compose(transcript=[], text="یه عکس بساز", owner_name="Sara",
+                                  prompt="", owner_user_id=OWNER_ID, chat_id=555)
+    assert reply.images == (image,)
+    assert reply.text == "بفرما"

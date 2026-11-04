@@ -119,6 +119,20 @@ Telegram ──▶ business_connection ──▶ business_connection_handler ─
   explicitly. Telegram delivers neither unless they are requested, so the list
   is built by `_allowed_updates()` instead of relying on `ALL_TYPES`. A webhook
   deployment must pass the same list.
+- **`drop_pending_updates=False`** is set explicitly. Telegram holds updates for
+  24 hours; a `business_connection` that arrived while the bot was restarting is
+  the *only* notice of that grant, so the queue must not be discarded on start.
+- **The connection handler has a handler group of its own (`-3`).**
+  python-telegram-bot runs **at most one handler per group**, so a
+  `BusinessConnectionHandler` registered beside the catch-all access guard
+  (`TypeHandler(Update, …)`, group `-1`) never runs: Telegram delivers the
+  update, the guard matches first, and the handler is dead code. This was a real
+  bug; three tests now fail if it comes back.
+- **Startup recovery asks Telegram.** A `business_connection` update is
+  delivered once. If it was consumed while the bot was down, or arrived before
+  this feature existed, the stored id is re-checked with
+  `get_business_connection(id)` at startup, so the grant is restored (or marked
+  off, if the owner removed it) without anyone reconnecting by hand.
 - **The ordinary message handler never sees a business message.** The secretary
   handler runs first and raises `ApplicationHandlerStop`, and the normal text
   handler excludes `UpdateType.BUSINESS_MESSAGE` as a second guard. Without that,
@@ -145,6 +159,26 @@ Telegram ──▶ business_connection ──▶ business_connection_handler ─
 | `BUSINESS_MAX_REPLY_CHARS` | `900` | Longer replies are discarded, not truncated |
 | `BUSINESS_HISTORY_TURNS` | `10` | Exchanges kept per customer chat |
 | `BUSINESS_MAX_MESSAGE_AGE_SECONDS` | `180` | Older messages are ignored instead of answered late |
+
+## When nothing answers
+
+The first thing to check is the log line the handler now writes on arrival:
+
+```text
+Business connection update | id=AB12… | enabled=True | owner=42
+```
+
+| What you see | What it means |
+| --- | --- |
+| The line above | The update reached Aura; the grant is stored |
+| Nothing at all | Telegram is not delivering it: check Business Mode in BotFather, the running bot token, and that `allowed_updates` includes `business_connection` |
+| `Business connection recovered` at startup | The update was missed, but the stored id was re-checked against Telegram |
+| `Business connection no longer valid` | The owner removed the bot; the row is kept as history and switched off |
+| `Business message skipped \| reason=no_rights` | The connection exists but the *reply* right was not granted |
+| `reason=disabled` / `reason=paused` | The BotFather grant is off, or `/secretary off` was used |
+
+The connection id is also readable in `/secretary` output and in the
+`business_connections` table.
 
 ## Privacy
 

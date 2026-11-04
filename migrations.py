@@ -118,6 +118,44 @@ def ensure_reminder_recurrence_columns(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE reminders ADD COLUMN anchor_utc INTEGER NOT NULL DEFAULT 0")
 
 
+def ensure_business_tables(db: sqlite3.Connection) -> None:
+    """Create the secretary-mode tables in a database that predates them.
+
+    ``BusinessStore`` also creates these on construction; the migration exists so
+    an existing ``bot.db`` gains them at upgrade time, and so a later change to
+    the connection table has a version to attach to. Every statement is
+    ``IF NOT EXISTS``: a fresh database and an upgraded one end up identical.
+    """
+    db.execute("""CREATE TABLE IF NOT EXISTS business_connections (
+        id TEXT PRIMARY KEY,
+        owner_user_id INTEGER NOT NULL,
+        owner_chat_id INTEGER NOT NULL,
+        owner_name TEXT NOT NULL DEFAULT '',
+        is_enabled INTEGER NOT NULL DEFAULT 0,
+        can_reply INTEGER NOT NULL DEFAULT 1,
+        can_read INTEGER NOT NULL DEFAULT 1,
+        updated_at INTEGER NOT NULL
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS business_state (
+        key TEXT PRIMARY KEY, value TEXT NOT NULL
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS business_replies (
+        connection_id TEXT NOT NULL, owner_user_id INTEGER NOT NULL DEFAULT 0,
+        chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
+        replied_at INTEGER NOT NULL, PRIMARY KEY (connection_id, chat_id, message_id)
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS business_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        connection_id TEXT NOT NULL, owner_user_id INTEGER NOT NULL DEFAULT 0,
+        chat_id INTEGER NOT NULL, role TEXT NOT NULL,
+        content TEXT NOT NULL, created_at INTEGER NOT NULL
+    )""")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_business_messages_chat"
+               " ON business_messages(connection_id, chat_id, id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_business_replies_chat"
+               " ON business_replies(connection_id, chat_id, replied_at)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -128,6 +166,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=2,
         name="recurring-reminders",
         apply=ensure_reminder_recurrence_columns,
+    ),
+    Migration(
+        version=3,
+        name="secretary-mode",
+        apply=ensure_business_tables,
     ),
 )
 

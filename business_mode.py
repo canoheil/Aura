@@ -194,6 +194,10 @@ class BusinessStore:
         self.db = db
         self.lock = lock
         self.clock = clock
+        # Connections are read once per incoming message; keeping them in memory
+        # means the common path is a dict lookup. Every writer below invalidates
+        # its own entry, so a cached connection is never stale for long.
+        self._cache: dict[str, Connection] = {}
         if self.db.row_factory is None:
             self.db.row_factory = sqlite3.Row
         with self.lock:
@@ -219,6 +223,7 @@ class BusinessStore:
                  int(bool(can_reply)), int(bool(can_read)), int(self.clock())),
             )
             self.db.commit()
+            self._cache.pop(str(connection_id), None)
 
     def disable(self, connection_id: str) -> bool:
         """The owner switched the connection off (or removed the bot)."""
@@ -226,12 +231,36 @@ class BusinessStore:
             cur = self.db.execute("UPDATE business_connections SET is_enabled=0, updated_at=? WHERE id=?",
                                   (int(self.clock()), str(connection_id)))
             self.db.commit()
+            self._cache.pop(str(connection_id), None)
             return cur.rowcount >= 1
 
     def get(self, connection_id: str) -> Optional[Connection]:
+        key = str(connection_id)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
         with self.lock:
-            row = self.db.execute("SELECT * FROM business_connections WHERE id=?", (str(connection_id),)).fetchone()
-        return _connection(row) if row else None
+            row = self.db.execute("SELECT * FROM business_connections WHERE id=?", (key,)).fetchone()
+            connection = _connection(row) if row else None
+            if connection is not None:
+                self._cache[key] = connection
+        return connection
+
+    def clear_cache(self) -> None:
+        """Forget every cached connection.
+
+        ``save``/``disable`` invalidate their own entry, but a bulk delete —
+        ``/deletemydata`` — goes straight to SQL and cannot know about this
+        store, so the caller drops the cache explicitly.
+        """
+        with self.lock:
+            self._cache.clear()
+
+    def warm(self, connections: list[Connection]) -> None:
+        """Preload the cache, e.g. from the startup recovery."""
+        with self.lock:
+            for connection in connections:
+                self._cache[connection.id] = connection
 
     def list(self, owner_user_id: Optional[int] = None) -> list[Connection]:
         query = "SELECT * FROM business_connections"
@@ -364,6 +393,7 @@ class BusinessStore:
             self.db.execute("DELETE FROM business_replies WHERE connection_id=?", (str(connection_id),))
             cur = self.db.execute("DELETE FROM business_connections WHERE id=?", (str(connection_id),))
             self.db.commit()
+            self._cache.pop(str(connection_id), None)
             return cur.rowcount >= 1
 
 
@@ -483,6 +513,50 @@ class Secretary:
         removed = self.store.disable(connection_id)
         logger.info("Business connection disabled | owner=%s | known=%s", owner_user_id, removed)
         return None
+
+    # --- startup: what Telegram says, not what this process remembers ---
+    async def restore(self, fetch: Callable[[str], object]) -> dict[str, str]:
+        """Re-check every stored connection against Telegram at startup.
+
+        A ``business_connection`` update is delivered once. If it arrived while
+        the bot was restarting, or before this feature existed, the grant is in
+        the database but this process never heard about it — and it would stay
+        silent for every customer. Asking Telegram directly closes that hole.
+
+        ``fetch`` is ``bot.get_business_connection``: it takes the id and returns
+        an object with ``is_enabled``, ``rights`` and ``user``. A connection the
+        owner has since removed comes back as an error, which is a "no" too.
+        """
+        outcome: dict[str, str] = {}
+        restored: list[Connection] = []
+        for stored in self.store.list():
+            try:
+                live = await fetch(stored.id)
+            except Exception as exc:
+                # Removed in BotFather, or Telegram says the id is unknown: the
+                # stored grant is dead, and pretending otherwise misleads the
+                # owner. Keep the row as history, but switch it off.
+                self.store.disable(stored.id)
+                outcome[stored.id] = f"unavailable:{type(exc).__name__}"
+                logger.warning("Business connection no longer valid | id=%s | %s", stored.id, type(exc).__name__)
+                continue
+            rights = getattr(live, "rights", None)
+            enabled = bool(getattr(live, "is_enabled", stored.is_enabled))
+            name = " ".join(str(getattr(getattr(live, "user", None), "first_name", "") or "").split())
+            self.store.save(
+                connection_id=stored.id, owner_user_id=stored.owner_user_id,
+                owner_chat_id=stored.owner_chat_id, is_enabled=enabled,
+                can_reply=bool(getattr(rights, "can_reply", True)) if rights is not None else stored.can_reply,
+                can_read=bool(getattr(rights, "can_read", True)) if rights is not None else stored.can_read,
+                owner_name=name or stored.owner_name,
+            )
+            refreshed = self.store.get(stored.id)
+            if refreshed is not None:
+                restored.append(refreshed)
+            outcome[stored.id] = "enabled" if enabled else "disabled"
+            logger.info("Business connection recovered | id=%s | enabled=%s", stored.id, enabled)
+        self.store.warm(restored)
+        return outcome
 
     # --- requirements 3, 4 & 5: the message and the answer ---
     async def handle(self, incoming: Incoming, *, owner_name: str = "",

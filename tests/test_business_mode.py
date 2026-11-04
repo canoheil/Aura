@@ -14,10 +14,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 from telegram import Update
-from telegram.ext import ApplicationHandlerStop, BusinessConnectionHandler, filters
+from telegram.ext import ApplicationHandlerStop, BusinessConnectionHandler, TypeHandler, filters
 from test_agent_tool_response import _text_response
 from test_reminder_conversation import _update_with_text
 
+import migrations
 from business_mode import (
     BusinessStore,
     Incoming,
@@ -520,8 +521,10 @@ def test_the_owner_can_delete_the_business_rows_with_their_data(isolated_bot):
     asyncio.run(bot.business_connection_handler(_connection_update(), SimpleNamespace(bot=_telegram())))
     plan = bot.data_deletion.plan(bot.db, OWNER_ID, lock=bot.db_lock)
     assert plan["business"] == 1
-    bot.data_deletion.delete(bot.db, OWNER_ID, lock=bot.db_lock)
-    assert bot.business_store.get(CONNECTION) is None
+    deleted = bot.data_deletion.delete(bot.db, OWNER_ID, lock=bot.db_lock)
+    assert deleted["business"] == 1
+    row = bot.db.execute("SELECT 1 FROM business_connections WHERE id=?", (CONNECTION,)).fetchone()
+    assert row is None
 
 
 def test_an_edited_customer_message_is_not_answered_again(isolated_bot):
@@ -553,3 +556,195 @@ def test_a_customer_can_return_with_a_new_message(isolated_bot):
     _run_business(bot, _business_message(text="پس بفرستید", message_id=2), _telegram())
     transcript = bot.business_store.history(CONNECTION, 555)
     assert len(transcript) == 4 and transcript[2]["content"] == "پس بفرستید"
+
+
+# --- the bug this section exists for ---------------------------------------
+#
+# python-telegram-bot runs **at most one handler per group** (the dispatch loop
+# breaks after the first match). The group access guard is a `TypeHandler(Update)`
+# and therefore matches everything, so anything registered beside it in group -1
+# is dead code: Telegram delivers the update, PTB hands it to the guard, and the
+# handler never runs. The connection update used to be registered exactly there.
+
+def _dispatched_update(application, update):
+    """Run one update through PTB's real dispatch loop, offline.
+
+    `Application.process_update` is the production path; only the bot object is
+    replaced, so a handler that is unreachable because of a group collision is
+    unreachable here too.
+    """
+    application.bot = _telegram()
+    application._initialized = True
+    asyncio.run(application.process_update(update))
+    return application.bot
+
+
+def _connection_update_object(bot, *, connection_id=CONNECTION, enabled=True):
+    return Update.de_json({
+        "update_id": 1,
+        "business_connection": {
+            "id": connection_id,
+            "user": {"id": OWNER_ID, "is_bot": False, "first_name": "Sara"},
+            "user_chat_id": OWNER_ID, "date": int(datetime.now(timezone.utc).timestamp()),
+            "is_enabled": enabled, "rights": {"can_reply": True, "can_read": True},
+        },
+    }, bot=SimpleNamespace())
+
+
+def test_a_business_connection_update_actually_reaches_its_handler(isolated_bot):
+    """The regression: a real dispatch, not a handler that merely exists."""
+    bot, _ = isolated_bot
+    application = bot.build_application()
+    telegram = _dispatched_update(application, _connection_update_object(bot))
+
+    stored = bot.business_store.get(CONNECTION)
+    assert stored is not None and stored.is_enabled is True
+    # And the owner was told, which only happens inside the handler.
+    telegram.send_message.assert_awaited()
+
+
+def test_no_catch_all_handler_shares_a_group_with_the_connection_handler(isolated_bot):
+    """The rule behind the regression, asserted directly so it cannot return."""
+    bot, _ = isolated_bot
+    application = bot.build_application()
+    for group, handlers in application.handlers.items():
+        catches_everything = any(
+            isinstance(handler, TypeHandler) and handler.callback is bot.group_access_guard
+            for handler in handlers
+        )
+        if catches_everything:
+            assert len(handlers) == 1, (
+                f"group {group} holds the catch-all access guard and "
+                f"{[type(other).__name__ for other in handlers if other.callback is not bot.group_access_guard]}; "
+                "they can never run"
+            )
+
+
+def test_the_connection_handler_has_a_group_of_its_own(isolated_bot):
+    bot, _ = isolated_bot
+    application = bot.build_application()
+    holding = [group for group, handlers in application.handlers.items()
+               if any(isinstance(handler, BusinessConnectionHandler) for handler in handlers)]
+    assert len(holding) == 1
+    assert holding[0] == bot.GROUP_BUSINESS_CONNECTION
+    assert holding[0] < bot.GROUP_ACCESS_GUARD < 0
+
+
+# --- persistence and recovery (the restart-safe path) ----------------------
+
+def test_a_stored_connection_survives_a_new_process():
+    db = sqlite3.connect(":memory:", check_same_thread=False)
+    db.row_factory = sqlite3.Row
+    lock = threading.Lock()
+    first = BusinessStore(db, lock)
+    first.save(connection_id=CONNECTION, owner_user_id=OWNER_ID, owner_chat_id=OWNER_ID,
+               is_enabled=True, can_reply=True, owner_name="شرکت رضایی")
+
+    # A fresh store on the same file is what a restart looks like.
+    second = BusinessStore(db, lock)
+    restored = second.get(CONNECTION)
+    assert restored is not None
+    assert (restored.id, restored.owner_user_id, restored.is_enabled, restored.can_reply,
+            restored.owner_name) == (CONNECTION, OWNER_ID, True, True, "شرکت رضایی")
+
+
+def test_the_cache_never_serves_a_connection_that_changed():
+    store, _ = _store()
+    _connection(store)
+    assert store.get(CONNECTION).is_enabled is True
+    store.disable(CONNECTION)
+    assert store.get(CONNECTION).is_enabled is False
+    store.save(connection_id=CONNECTION, owner_user_id=OWNER_ID, owner_chat_id=OWNER_ID,
+               is_enabled=True, can_reply=False)
+    assert store.get(CONNECTION).can_reply is False
+
+
+def test_restart_recovery_asks_telegram_instead_of_trusting_the_database():
+    store, _ = _store()
+    _connection(store, enabled=True)
+    secretary, _ = _secretary(store)
+
+    live = SimpleNamespace(is_enabled=True, rights=SimpleNamespace(can_reply=True, can_read=True),
+                           user=SimpleNamespace(first_name="Sara"))
+
+    async def fetch(connection_id):
+        assert connection_id == CONNECTION
+        return live
+
+    outcome = asyncio.run(secretary.restore(fetch))
+    assert outcome == {CONNECTION: "enabled"}
+    assert store.get(CONNECTION).is_enabled is True
+
+
+def test_recovery_switches_off_a_connection_the_owner_removed():
+    store, _ = _store()
+    _connection(store, enabled=True)
+    secretary, _ = _secretary(store)
+
+    async def gone(_connection_id):
+        raise RuntimeError("Bad Request: BUSINESS_CONNECTION_INVALID")
+
+    outcome = asyncio.run(secretary.restore(gone))
+    assert outcome[CONNECTION].startswith("unavailable")
+    # Kept as history, but nothing can be answered through it any more.
+    assert store.get(CONNECTION).is_enabled is False
+
+
+def test_recovery_picks_up_a_connection_that_arrived_while_the_bot_was_off(isolated_bot):
+    bot, _ = isolated_bot
+    bot.business_store.save(connection_id=CONNECTION, owner_user_id=OWNER_ID,
+                            owner_chat_id=OWNER_ID, is_enabled=True, owner_name="Sara")
+    telegram = _telegram()
+    live = SimpleNamespace(is_enabled=True, rights=SimpleNamespace(can_reply=True, can_read=True),
+                           user=SimpleNamespace(first_name="Sara"))
+    telegram.get_business_connection = AsyncMock(return_value=live)
+    application = SimpleNamespace(bot=telegram)
+
+    outcome = asyncio.run(bot.restore_business_connections(application))
+    telegram.get_business_connection.assert_awaited_once_with(CONNECTION)
+    assert outcome == {CONNECTION: "enabled"}
+
+
+def test_recovery_is_quiet_when_nothing_was_ever_granted(isolated_bot):
+    bot, _ = isolated_bot
+    telegram = _telegram()
+    telegram.get_business_connection = AsyncMock()
+    assert asyncio.run(bot.restore_business_connections(SimpleNamespace(bot=telegram))) == {}
+    telegram.get_business_connection.assert_not_awaited()
+
+
+def test_a_broken_recovery_never_blocks_startup(isolated_bot):
+    bot, _ = isolated_bot
+    bot.business_store.save(connection_id=CONNECTION, owner_user_id=OWNER_ID,
+                            owner_chat_id=OWNER_ID, is_enabled=True)
+    telegram = _telegram()
+    telegram.get_business_connection = AsyncMock(side_effect=RuntimeError("network"))
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    bot._business_secretary = broken
+    assert asyncio.run(bot.restore_business_connections(SimpleNamespace(bot=telegram))) == {}
+
+
+# --- polling settings -------------------------------------------------------
+
+def test_polling_keeps_pending_updates_so_a_missed_connection_can_arrive(isolated_bot):
+    """Telegram holds updates for 24h; dropping them loses the only notice."""
+    bot, _ = isolated_bot
+    kwargs = bot._polling_kwargs()
+    assert kwargs["drop_pending_updates"] is False
+    assert bot.UpdateType.BUSINESS_CONNECTION in kwargs["allowed_updates"]
+    assert bot.UpdateType.BUSINESS_MESSAGE in kwargs["allowed_updates"]
+
+
+def test_a_legacy_database_gains_the_connection_table():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    migrations.migrate(db, migrations=(migrations.MIGRATIONS[0],))
+    tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    migrations.migrate(db, migrations=migrations.MIGRATIONS)
+    tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"business_connections", "business_state", "business_messages", "business_replies"} <= tables
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(business_connections)")}
+    assert {"id", "owner_user_id", "owner_chat_id", "is_enabled", "can_reply", "can_read"} <= columns

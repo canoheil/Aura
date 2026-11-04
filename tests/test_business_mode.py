@@ -275,13 +275,23 @@ def test_the_reply_is_recorded_so_a_restart_cannot_repeat_it():
 def test_the_prompt_states_the_boundary_it_must_not_cross():
     prompt = secretary_prompt("Sara", customer_name="Ali", first_contact=True, disclose_always=True)
     assert "Sara" in prompt and "Ali" in prompt
-    for phrase in ("You are not Sara", "AI assistant", "never invent prices", "no access"):
+    for phrase in ("You are not Sara", "invent prices", "private life"):
         assert phrase.lower() in prompt.lower()
+
+
+def test_the_prompt_keeps_the_same_aura_voice_rather_than_a_stiffer_bot():
+    """The owner asked for one Aura everywhere, not a formal secretary voice."""
+    prompt = secretary_prompt("Sara")
+    assert "same Aura as in the group chats" in prompt
+    # And it stops describing the owner as a business with customers.
+    for gone in ("business account", "customer", "the account owner"):
+        assert gone not in prompt.lower()
 
 
 def test_the_disclosure_can_be_relaxed_without_losing_honesty():
     relaxed = secretary_prompt("Sara", disclose_always=False)
-    assert "AI assistant" in relaxed
+    assert "assistant" in relaxed
+    assert "never claim to be them" in relaxed
     assert "first message" not in relaxed
 
 
@@ -406,7 +416,39 @@ def test_a_media_message_is_answered_without_guessing(isolated_bot):
     asyncio.run(bot.business_connection_handler(_connection_update(), SimpleNamespace(bot=_telegram())))
     telegram = _telegram()
     _run_business(bot, _business_message(text=None), telegram)
-    assert "فقط پیام متنی" in telegram.send_message.await_args.kwargs["text"]
+    said = telegram.send_message.await_args.kwargs["text"]
+    assert "نمی‌توانم عکس" in said
+    # It used to promise to keep the file "for the owner" — a promise nothing
+    # keeps, in a persona the owner does not want.
+    assert "مدیر" not in said
+
+
+def test_switching_secretary_mode_off_silences_media_too(isolated_bot):
+    """The reported bug: `/secretary off`, yet a GIF still got an answer."""
+    bot, _ = isolated_bot
+    asyncio.run(bot.business_connection_handler(_connection_update(), SimpleNamespace(bot=_telegram())))
+    bot.business_store.set_paused(True)
+    telegram = _telegram()
+    _run_business(bot, _business_message(text=None), telegram)
+    telegram.send_message.assert_not_awaited()
+
+
+def test_media_is_not_announced_without_the_reply_right(isolated_bot):
+    bot, _ = isolated_bot
+    telegram = _telegram()
+    bot.business_store.save(connection_id=CONNECTION, owner_user_id=OWNER_ID,
+                            owner_chat_id=OWNER_ID, is_enabled=True, can_reply=False)
+    _run_business(bot, _business_message(text=None), telegram)
+    telegram.send_message.assert_not_awaited()
+
+
+def test_media_is_not_announced_once_the_connection_is_gone(isolated_bot):
+    bot, _ = isolated_bot
+    asyncio.run(bot.business_connection_handler(_connection_update(), SimpleNamespace(bot=_telegram())))
+    bot.business_store.disable(CONNECTION)
+    telegram = _telegram()
+    _run_business(bot, _business_message(text=None), telegram)
+    telegram.send_message.assert_not_awaited()
 
 
 def test_a_message_for_an_unknown_connection_is_ignored(isolated_bot):

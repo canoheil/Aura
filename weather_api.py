@@ -183,11 +183,24 @@ class DailyWeather:
 
 
 @dataclass(frozen=True)
+class HourlyWeather:
+    """One hour of the near forecast, for the weather card's hour strip."""
+    time: str
+    weather_code: int
+    temperature: float
+    precipitation_probability: Optional[float] = None
+    is_day: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class WeatherReport:
     location: ResolvedLocation
     current: CurrentWeather
     daily: tuple[DailyWeather, ...]
     fetched_at: float
+    # The next hours, in the place's own timezone. Empty when the upstream
+    # answer carried none; nothing downstream requires it.
+    hourly: tuple[HourlyWeather, ...] = ()
 
 
 # ---------- conservative request detection ----------
@@ -322,6 +335,42 @@ def extract_weather_location(text: str) -> Optional[str]:
     if len(location) < 2 or location.lower() in _LOCATION_FILLERS:
         return None
     return location[:_MAX_LOCATION_CHARS]
+
+
+def _hours_from_payload(payload: dict, after: str = "") -> tuple[HourlyWeather, ...]:
+    """The hourly rows at or after ``after``, tolerating a ragged answer.
+
+    Upstream is a free service that may omit a field or return arrays of
+    different lengths, so every row is validated on its own and a broken row is
+    skipped rather than failing the whole report.
+    """
+    hourly_raw = payload.get("hourly") if isinstance(payload, dict) else None
+    if not isinstance(hourly_raw, dict):
+        return ()
+    times = hourly_raw.get("time") or []
+    codes = hourly_raw.get("weather_code") or []
+    temps = hourly_raw.get("temperature_2m") or []
+    probabilities = hourly_raw.get("precipitation_probability") or []
+    daylight = hourly_raw.get("is_day") or []
+    rows: list[HourlyWeather] = []
+    for index, moment in enumerate(times):
+        stamp = str(moment or "")
+        if not stamp or (after and stamp < after):
+            continue
+        try:
+            rows.append(HourlyWeather(
+                time=stamp,
+                weather_code=int(codes[index]) if index < len(codes) and codes[index] is not None else 0,
+                temperature=float(temps[index]) if index < len(temps) and temps[index] is not None else 0.0,
+                precipitation_probability=(
+                    float(probabilities[index])
+                    if index < len(probabilities) and probabilities[index] is not None else None
+                ),
+                is_day=int(daylight[index]) if index < len(daylight) and daylight[index] is not None else None,
+            ))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return tuple(rows)
 
 
 # ---------- client ----------
@@ -586,8 +635,10 @@ class WeatherClient:
             "longitude": loc.longitude,
             "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m,precipitation,cloud_cover,is_day",
             "daily": "weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_sum,precipitation_probability_max,wind_speed_10m_max",
+            "hourly": "temperature_2m,weather_code,precipitation_probability,is_day",
             "timezone": "auto",
             "forecast_days": 3,
+            "forecast_hours": 12,
         }
         payload = self._get_json(self._forecast_url, params, label="Forecast")
 
@@ -644,7 +695,14 @@ class WeatherClient:
             except (TypeError, ValueError, IndexError):
                 continue
 
-        return WeatherReport(location=loc, current=current, daily=tuple(daily), fetched_at=time.time())
+        return WeatherReport(
+            location=loc, current=current, daily=tuple(daily), fetched_at=time.time(),
+            hourly=_hours_from_payload(payload, current.time),
+        )
+
+    @staticmethod
+    def _hours(payload: dict, after: str) -> tuple[HourlyWeather, ...]:
+        return _hours_from_payload(payload, after)
 
     def format_for_model(self, report: WeatherReport) -> dict:
         """Return a compact, model-friendly dict for the tool response."""

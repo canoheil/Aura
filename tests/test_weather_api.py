@@ -456,6 +456,9 @@ class BotWiringTests(unittest.TestCase):
             "weather_client": client,
             "logger": logging.getLogger("test-weather"),
             "WeatherError": weather_api.WeatherError,
+            # The handler hands picture work to a separate helper on purpose;
+            # this harness executes the handler alone, so stub the seam.
+            "_queue_weather_card": lambda *args, **kwargs: None,
         }
 
     def test_handler_disabled_client(self):

@@ -20,7 +20,7 @@ If your provider is a hosted service, that is the only outbound requirement:
 | `api.telegram.org` | always |
 | `generativelanguage.googleapis.com` or your gateway | always |
 | `api.you.com` | web search (optional) |
-| `geocoding-api.open-meteo.com`, `api.open-meteo.com` | weather (optional, keyless) |
+| `geocoding-api.open-meteo.com`, `api.open-meteo.com` | weather and its card (optional, keyless; the card itself is drawn locally) |
 | `meme-api.com` and its mirror | memes (optional, keyless) |
 | `image.pollinations.ai` | image generation (optional) |
 | Reddit/YouTube URLs | memes and YouTube analysis (optional) |

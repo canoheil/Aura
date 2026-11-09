@@ -89,6 +89,9 @@ search result snippet.
 
 ## Weather
 
+Weather has [its own page](weather.md), including the card Aura draws beside a
+forecast; the short version follows.
+
 Weather is keyless, needs no extra dependency, and runs fine on shared hosting:
 it is a pair of plain HTTPS calls with `requests`.
 
@@ -119,3 +122,4 @@ e.g. "weather in Springfield, Massachusetts".
 | `WEATHER_TIMEOUT` | `8` | Total timeout for geocoding + forecast |
 | `WEATHER_CACHE_TTL` | `600` | Cache lifetime per city |
 | `WEATHER_TOOL_MAX_CALLS` | `2` | Calls per turn |
+| `WEATHER_CARD_ENABLED` | `true` | The forecast card ([details](weather.md#the-weather-card)) |

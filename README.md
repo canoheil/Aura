@@ -59,7 +59,7 @@ message, and `/deletemydata` wipes a person's data in one transaction.
 | --- | --- |
 | Conversation | Persistent per-chat history in SQLite, rolling summaries, long-term memory with `search`/`save`/`forget` tools |
 | Models | Gemini (native) or any OpenAI-compatible gateway; per-user model choice, `/admin` switching |
-| Retrieval | Guarded You.com web search with a freshness gate, page opening, weather from Open-Meteo (keyless) |
+| Retrieval | Guarded You.com web search with a freshness gate, page opening, weather from Open-Meteo (keyless) with a locally drawn forecast card |
 | Media in | Photos, image documents, stickers, voice, audio, video, video notes, documents, YouTube links |
 | Media out | Photorealistic images via Pollinations (optional), vector images rendered locally from SVG, Reddit memes (keyless) |
 | Secretary mode | Answers the owner's Telegram Business account as the **same** Aura: one prompt, one engine, the same tools and media — minus the owner's memory and reminders. Reads photos, stickers, GIFs and voice; can send a sticker or a picture back; may use what was said in a group the person is verifiably in (one way only). `/secretary` pauses it |
@@ -134,7 +134,8 @@ Commands are not the only interface: ordinary sentences work too. „۱۰ دقی
 | [Configuration](docs/configuration.md) | Every environment variable, precedence, `/admin`, persona, quotas |
 | [Model providers](docs/providers.md) | Gemini vs. OpenAI-compatible, keys, encryption, graceful degradation |
 | [Media](docs/media.md) | Inbound photos/audio/video/stickers/files, image generation, SVG, memes |
-| [Search and retrieval](docs/search.md) | Freshness gate, evidence rules, cost bounds, weather |
+| [Search and retrieval](docs/search.md) | Freshness gate, evidence rules, cost bounds |
+| [Weather](docs/weather.md) | Open-Meteo weather, and the local card drawn beside it |
 | [Reminders](docs/reminders.md) | Parsing, storage, delivery, edge cases |
 | [Secretary mode](docs/business.md) | Telegram Business: what customers get, the boundary, the owner's controls |
 | [Data and privacy](docs/data-and-privacy.md) | What is stored, `/deletemydata`, migrations, backups |
@@ -174,7 +175,7 @@ on Gemini or on a local Ollama model.
 | `freshness_policy.py`, `answer_quality.py` | When a search is mandatory, and what a trustworthy answer looks like |
 | `reminder_time.py`, `recurrence.py`, `reminders.py`, `business_mode.py`, `group_memory.py`, `memory_bridge.py`, `data_deletion.py` | Time and repeat parsing, secretary mode, shared-group context, durable state and its lifecycle |
 | `telegram_formatting.py`, `i18n.py` | Copy-safe HTML and the Persian/English catalog |
-| `sticker_manager.py`, `sticker_vision.py`, `svg_image.py`, `pollinations_image.py`, `meme_api.py`, `weather_api.py` | Optional capabilities |
+| `sticker_manager.py`, `sticker_vision.py`, `svg_image.py`, `pollinations_image.py`, `meme_api.py`, `weather_api.py`, `weather_card.py` | Optional capabilities |
 
 More detail — including why the prompt is layered the way it is — is in
 [docs/architecture.md](docs/architecture.md).

@@ -50,6 +50,7 @@ import providers
 import sticker_vision
 import svg_image
 import usage_limits
+import weather_card
 from admin_panel import AdminAccess, admin_callback, admin_command
 from answer_quality import has_any_web_evidence, has_web_evidence, remove_generated_source_section
 from aura_identity import AuraIdentity
@@ -454,6 +455,15 @@ weather_client = WeatherClient(
 if WEATHER_ENABLED and not weather_client.is_enabled:
     raise RuntimeError("WEATHER_ENABLED is true but no valid WEATHER_*_URL is configured")
 
+# A picture of the same forecast, drawn locally for the weather answer. It goes
+# through the ordinary image delivery path, so a failure is a missing picture,
+# never a missing answer.
+WEATHER_CARD_ENABLED = os.getenv("WEATHER_CARD_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+WEATHER_CARD_AVAILABLE = WEATHER_CARD_ENABLED and weather_card.is_available()
+WEATHER_CARD_UNAVAILABLE_REASON = (
+    weather_card.unavailable_reason() if WEATHER_CARD_ENABLED and not WEATHER_CARD_AVAILABLE else ""
+)
+
 # Meme sending through meme-api.com (no API key, no quota). The primary service
 # is keyless and sometimes flaky, so an optional mirror with the same JSON shape
 # is tried second. Every value is validated fail-fast, and the tool is only
@@ -600,6 +610,11 @@ logger = logging.getLogger("aura-telegram-bot")
 
 if SVG_IMAGE_UNAVAILABLE_REASON:
     logger.warning("SVG image authoring disabled: %s", SVG_IMAGE_UNAVAILABLE_REASON)
+
+if WEATHER_CARD_UNAVAILABLE_REASON:
+    logger.warning(
+        "Weather cards disabled: %s; weather answers stay text-only", WEATHER_CARD_UNAVAILABLE_REASON,
+    )
 
 if not POLLINATIONS_ENABLED:
     logger.info("Pollinations image features are disabled (POLLINATIONS_ENABLED=false).")
@@ -2665,6 +2680,19 @@ _WEATHER_TOOL_DESCRIPTION = (
 )
 
 
+def _turn_language(args: dict) -> str:
+    """The language of the person this tool call belongs to.
+
+    AgentRunner injects runtime context as ``_``-prefixed handler arguments, so
+    the tool can pick the language the reply is about to be written in without
+    the model having to pass it.
+    """
+    value = args.get("_lang")
+    if isinstance(value, str) and value in i18n.LANGUAGES:
+        return value
+    return i18n.DEFAULT_LANGUAGE
+
+
 def _build_weather_declaration() -> types.FunctionDeclaration:
     return types.FunctionDeclaration(
         name="get_weather",
@@ -2705,8 +2733,31 @@ def _tool_get_weather(args: dict) -> dict:
         data["location"], data["latitude"], data["longitude"],
         data["current"]["temperature_c"], data["current"]["weather_code"],
     )
+    _queue_weather_card(args, report)
     return {"ok": True, "status": "ready", "weather": data}
 
+
+def _queue_weather_card(args: dict, report) -> None:
+    """Queue one weather card beside the answer, if this turn asked for one.
+
+    Kept out of the tool handler so the weather tool itself stays a plain
+    data fetch: it touches no picture pipeline, and the model's function
+    response never carries image bytes. A card that cannot be drawn is a log
+    line, never a failed weather answer.
+    """
+    if not WEATHER_CARD_AVAILABLE or args.get("_weather_card_allowed") is not True:
+        return
+    delivery = args.get("_image_delivery")
+    if not isinstance(delivery, list):
+        return
+    if any(isinstance(item, weather_card.WeatherCard) for item in delivery):
+        return
+    try:
+        delivery.append(weather_card.render_weather_card(report, lang=_turn_language(args)))
+    except weather_card.WeatherCardError as exc:
+        logger.warning("Weather card skipped | %s", exc.message)
+    except Exception:
+        logger.exception("Unexpected weather card failure")
 
 
 # ---------- Real reminder action ----------
@@ -2754,6 +2805,7 @@ def _tool_schedule_reminder(args: dict) -> dict:
     """
     ctx = args.get("_reminder")
     lang = (ctx or {}).get("lang") if isinstance(ctx, dict) else None
+    lang = lang or _turn_language(args)
     if not isinstance(ctx, dict) or not ctx.get("explicit"):
         return {"ok": False, "code": "missing_intent", "safe_user_message":
                 _t("reminder.fallback.nothing", lang)}
@@ -6883,6 +6935,7 @@ def _weather_prompt_section() -> str:
         "- Never invent weather. If ok=false, say it briefly in natural Persian using the provided error and offer to try another city. Do not expose error codes, URLs or internal details.",
         "- Do not call get_weather for general chat that happens to mention rain or snow without a weather intent.",
         "- For an ordinary weather question, use get_weather instead of web_search; searching is slower, less exact, and spends quota for data the weather tool already has.",
+        "- A weather card picture of that same forecast is attached to Aura's answer automatically. Do not offer to draw one, do not call an image tool for it, and do not describe the card itself: answer in words, and let the picture speak for the numbers.",
     ])
 
 
@@ -7655,6 +7708,15 @@ async def message_handler(
             sticker_context["image_delivery"] = image_delivery
         if meme_client.is_enabled:
             sticker_context["image_delivery"] = image_delivery
+        if WEATHER_CARD_AVAILABLE:
+            # The card is drawn in the worker thread from the same report the
+            # model quotes; message_handler sends it after the text reply.
+            sticker_context["image_delivery"] = image_delivery
+            sticker_context["weather_card_allowed"] = bool(
+                looks_like_weather_request(text)
+                and not image_requested and not document_requested and not media_requested
+            )
+            sticker_context["lang"] = user_language(update)
 
         # Counted immediately before the call, so a message that reaches the
         # model is always paid for in the counter even if the call then fails.

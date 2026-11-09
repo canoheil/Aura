@@ -9,7 +9,7 @@
 pytest>=9.2.0,<10
 
 # Linter + import sorter (no formatter yet; see pyproject.toml).
-ruff>=0.17,<1
+ruff>=0.17.4,<1
 
 # Optional: the same checks run automatically before a commit/push.
 pre-commit>=4,<5

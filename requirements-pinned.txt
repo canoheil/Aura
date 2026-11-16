@@ -6,7 +6,7 @@ python-dotenv==1.2.4
 requests==2.34.2
 cryptography==46.0.7
 google-genai==2.34.0
-pypdf==6.21.4
+pypdf==7.0.1
 python-docx==1.2.0
 openpyxl==3.1.5
 python-pptx==1.0.2
